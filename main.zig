@@ -18,6 +18,7 @@ const WaylandMessageHeader = extern struct {
 
 const State = struct {
     wl_registry : u32 = undefined,
+    wl_output  : u32 = undefined,
     sync_id     : u32 = undefined,
 };
 
@@ -100,6 +101,35 @@ pub fn wayland_display_connect(env: *std.process.Environ.Map, gpa: std.mem.Alloc
     return fd;
 }
 
+/// This functions sends a request to the socket pointed by
+/// the file descriptor following the wire protocol format.
+pub fn wayland_send_request(fd: linux.fd_t, object_id: u32, opcode: u16, args: anytype) !void{
+    const field_types = @typeInfo(@TypeOf(args)).@"struct".field_types;
+    comptime var payload_size: usize = 0;
+    inline for(field_types) |field_type| payload_size += @sizeOf(field_type);
+
+    const total_size : u16 = @sizeOf(WaylandMessageHeader) + payload_size;
+    const header = WaylandMessageHeader{
+        .object_id = object_id,
+        .size_and_opcode = @as(u32, total_size) << 16 | opcode,
+    };
+
+    const field_names = @typeInfo(@TypeOf(args)).@"struct".field_names;
+    var payload : [payload_size]u8 = undefined;
+    comptime var offset : usize = 0;
+    inline for(field_names) |field_name| {
+        const value = @field(args, field_name);
+        const bytes = std.mem.asBytes(&value);
+        @memcpy(payload[offset..(offset+bytes.len)], bytes);
+        offset += bytes.len;
+    }
+
+    const buffer = std.mem.asBytes(&header) ++ payload;
+
+    const result = linux.sendto(fd, buffer, total_size, linux.MSG.DONTWAIT, null, 0);
+    if(linux.errno(result) != .SUCCESS) return error.WaylandSendToFailed;
+}
+
 /// might want to: make rolling id a function
 ///
 /// This function sends a wayland message to the connected socket to obtain a 
@@ -110,51 +140,47 @@ pub fn wayland_display_connect(env: *std.process.Environ.Map, gpa: std.mem.Alloc
 ///
 /// ref: https://wayland.freedesktop.org/docs/book/Protocol.html#wire-format
 /// ref: https://wayland-book.com/registry.html
-
 pub fn wayland_wl_display_get_registry(fd: linux.fd_t) !u32 {
-    const size : u16 = @sizeOf(WaylandMessageHeader) + @sizeOf(@TypeOf(wayland_rolling_object_id));
-    const header = WaylandMessageHeader{
-        .object_id = wayland_display_object_id,
-        .size_and_opcode = @as(u32, size) << 16 | wayland_wl_display_get_registry_opcode,
-    };
+    wayland_rolling_object_id += 1;
+    const new_id = wayland_rolling_object_id;
 
-    wayland_rolling_object_id = wayland_rolling_object_id + 1;
-    const payload = wayland_rolling_object_id;
-
-    const buffer = std.mem.asBytes(&header) ++ std.mem.asBytes(&payload);
-
-    const result = linux.sendto(fd, buffer, size, linux.MSG.DONTWAIT, null, 0);
-    if(linux.errno(result) != .SUCCESS) return error.WaylandWlDisplayGetRegistrySendToFailed;
+    try wayland_send_request(fd, wayland_display_object_id, wayland_wl_display_get_registry_opcode, .{new_id});
 
     std.log.info("wl_display@{}.get_registry: wl_registry={}", .{wayland_display_object_id, wayland_rolling_object_id});
-    return wayland_rolling_object_id;
+    return new_id;
 } 
 
 /// This function sends a wayland message to the connected socket to send a 
 /// sync request following the wire protocol format.
-/// This is sync object is then used when reading events to ensure
+/// This sync object is then used when reading events to ensure
 /// that all the information we expect to receive from the server
 /// has been sent.
 /// The function has the responsability of incrementing `wayland_rolling_object_id` 
 /// before using it as `object_id` and then returning it to caller.
 pub fn wayland_wl_display_sync(fd: linux.fd_t) !u32 {
-    const size : u16 = @sizeOf(WaylandMessageHeader) + @sizeOf(@TypeOf(wayland_rolling_object_id));
-    const header = WaylandMessageHeader{
-        .object_id = wayland_display_object_id,
-        .size_and_opcode = @as(u32, size) << 16 | wayland_wl_display_sync_opcode,
-    };
+    wayland_rolling_object_id += 1;
+    const new_id = wayland_rolling_object_id;
 
-    wayland_rolling_object_id = wayland_rolling_object_id + 1;
-    const payload = wayland_rolling_object_id;
-
-    const buffer = std.mem.asBytes(&header) ++ std.mem.asBytes(&payload);
-
-    const result = linux.sendto(fd, buffer, size, linux.MSG.DONTWAIT, null, 0);
-    if(linux.errno(result) != .SUCCESS) return error.WaylandWlDisplaySyncSendToFailed;
+    try wayland_send_request(fd, wayland_display_object_id, wayland_wl_display_sync_opcode, .{new_id});
 
     std.log.info("wl_display@{}.sync: sync={}", .{wayland_display_object_id, wayland_rolling_object_id});
-    return wayland_rolling_object_id;
+    return new_id;
 } 
+
+/// This function sends a wayland message to the connected socket to send a 
+/// bind request following the wire protocol format.
+/// This bind enables us to make requests to the just binded interface.
+/// The function has the responsability of incrementing `wayland_rolling_object_id` 
+/// before using it as `object_id` and then returning it to caller.
+pub fn wayland_wl_registry_bind(fd: linux.fd_t, wl_registry_obj_id: u32, name: u32) !u32 {
+    wayland_rolling_object_id += 1;
+    const new_id = wayland_rolling_object_id;
+
+    try wayland_send_request(fd, wl_registry_obj_id, wayland_wl_registry_bind_opcode, .{name, new_id});
+
+    std.log.info("wl_registry@{}.bind: bind={}", .{wayland_display_object_id, wayland_rolling_object_id});
+    return new_id;
+}
 
 /// might want to: make reading non blocking and use a circular buffer
 /// to avoid problems if more the information is split between different
@@ -169,7 +195,7 @@ pub fn wayland_wl_display_sync(fd: linux.fd_t) !u32 {
 /// It keeps reading using syscalls (not optimal, should use shared memory)
 /// untils the sync event gets returned.
 pub fn wayland_read_event_message(fd: linux.fd_t, state: *State) !void {
-    var buffer : [4096]u8 align(4) = undefined;
+    var buffer : [4096]u8 = undefined;
     var synced = false;
 
     while(synced == false){
@@ -190,6 +216,7 @@ pub fn wayland_read_event_message(fd: linux.fd_t, state: *State) !void {
 
             if(msg_len < payload_size) return error.IncompleteWaylandPayload;
 
+            std.log.info("", .{});
             std.log.info("object_id {d:>10}\t size {d:>6}\t opcode {d:>6}", .{object_id, size, opcode});
 
             var payload_ptr : [*]u8 = moving_ptr; 
@@ -199,22 +226,28 @@ pub fn wayland_read_event_message(fd: linux.fd_t, state: *State) !void {
                 const name      : u32        = try buf_read_u32(&payload_ptr, &payload_left);
                 const interface : []const u8 = try buf_read_string(&payload_ptr, &payload_left);
                 const version   : u32        = try buf_read_u32(&payload_ptr, &payload_left);
-                std.log.info("\t↳ (name: {},interface: {s},version: {})\n", .{name, interface, version});
+                std.log.info("\t↳ (name: {},interface: {s},version: {})", .{name, interface, version});
+
+                // todo: this is starting to look like 'if' nesting hell, could
+                // probably use a string hashmap instead. But for now will do.
+                if(std.mem.eql(u8, interface, "wl_output")){
+                    state.*.wl_output = try wayland_wl_registry_bind(fd, state.*.wl_registry, name);
+                }
             }
             else if(object_id == state.*.sync_id and opcode == wayland_wl_callback_event_done_opcode){
                 const callback_data : u32 = try buf_read_u32(&payload_ptr, &payload_left);
                 synced = true;
-                std.log.info("\t↳ (callback_data: {})\n", .{callback_data});
+                std.log.info("\t↳ (callback_data: {})", .{callback_data});
             }
             else if(object_id == wayland_display_object_id and opcode == wayland_wl_display_event_delete_id_opcode){
                 const deleted_id : u32 = try buf_read_u32(&payload_ptr, &payload_left);
                 std.log.info("\t↳ (deleted_id: {})\n", .{deleted_id});
             }
             else {
-                std.log.info("\t↳ (unknown event, {} bytes ignored)\n", .{payload_left});
+                std.log.info("\t↳ (unknown event, {} bytes ignored)", .{payload_left});
             }
             
-            if(payload_left > 0) std.log.warn("↳ skipped {} bytes during event parsing\n", .{payload_left});
+            if(payload_left > 0) std.log.warn("↳ skipped {} bytes during event parsing", .{payload_left});
             moving_ptr += payload_size;
             msg_len -= payload_size;
         }
