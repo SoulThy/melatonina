@@ -129,6 +129,13 @@ pub fn wayland_wl_display_get_registry(fd: linux.fd_t) !u32 {
     return wayland_rolling_object_id;
 } 
 
+/// This function sends a wayland message to the connected socket to send a 
+/// sync request following the wire protocol format.
+/// This is sync object is then used when reading events to ensure
+/// that all the information we expect to receive from the server
+/// has been sent.
+/// The function has the responsability of incrementing `wayland_rolling_object_id` 
+/// before using it as `object_id` and then returning it to caller.
 pub fn wayland_wl_display_sync(fd: linux.fd_t) !u32 {
     const size : u16 = @sizeOf(WaylandMessageHeader) + @sizeOf(@TypeOf(wayland_rolling_object_id));
     const header = WaylandMessageHeader{
@@ -160,13 +167,6 @@ pub fn wayland_wl_display_sync(fd: linux.fd_t) !u32 {
 /// based on the received event.
 /// It keeps reading using syscalls (not optimal, should use shared memory)
 /// untils the sync event gets returned.
-///
-/// important todo: currently, events that are not handled will not
-/// get consumed from the buffer thus errors when parsing are possible.
-/// We should use an internal moving ptr on the payload when parsing (ex.
-/// buf_read_u32(&payload_ptr, &payload_len)) content of events and
-/// we always increment by payload size the external moving ptr.
-/// This way even not handled events will always be consumed.
 pub fn wayland_read_event_message(fd: linux.fd_t, state: *State, sync_id: u32) !void {
     var buffer : [4096]u8 align(4) = undefined;
     var synced = false;
@@ -185,23 +185,37 @@ pub fn wayland_read_event_message(fd: linux.fd_t, state: *State, sync_id: u32) !
             const size_and_opcode : u32 = try buf_read_u32(&moving_ptr, &msg_len);
             const size            : u16 = @truncate(size_and_opcode >> 16);
             const opcode          : u16 = @truncate(size_and_opcode);
+            const payload_size    : usize = size - @sizeOf(WaylandMessageHeader);
+
+            if(msg_len < payload_size) return error.IncompleteWaylandPayload;
 
             std.log.info("object_id {d:>10}\t size {d:>6}\t opcode {d:>6}\n", .{object_id, size, opcode});
+
+            var payload_ptr : [*]u8 = moving_ptr; 
+            var payload_left = payload_size;
+
             if(object_id == state.*.wl_registry and opcode == wayland_wl_registry_event_global_opcode){
-                const name      : u32        = try buf_read_u32(&moving_ptr, &msg_len);
-                const interface : []const u8 = try buf_read_string(&moving_ptr, &msg_len);
-                const version   : u32        = try buf_read_u32(&moving_ptr, &msg_len);
+                const name      : u32        = try buf_read_u32(&payload_ptr, &payload_left);
+                const interface : []const u8 = try buf_read_string(&payload_ptr, &payload_left);
+                const version   : u32        = try buf_read_u32(&payload_ptr, &payload_left);
                 std.log.info("\t↳ (name: {},interface: {s},version: {})\n", .{name, interface, version});
             }
-            if(object_id == sync_id and opcode == wayland_wl_callback_event_done_opcode){
-                const callback_data : u32 = try buf_read_u32(&moving_ptr, &msg_len);
+            else if(object_id == sync_id and opcode == wayland_wl_callback_event_done_opcode){
+                const callback_data : u32 = try buf_read_u32(&payload_ptr, &payload_left);
                 synced = true;
                 std.log.info("\t↳ (callback_data: {})\n", .{callback_data});
             }
-            if(object_id == wayland_display_object_id and opcode == wayland_wl_display_event_delete_id_opcode){
-                const deleted_id : u32 = try buf_read_u32(&moving_ptr, &msg_len);
+            else if(object_id == wayland_display_object_id and opcode == wayland_wl_display_event_delete_id_opcode){
+                const deleted_id : u32 = try buf_read_u32(&payload_ptr, &payload_left);
                 std.log.info("\t↳ (deleted_id: {})\n", .{deleted_id});
             }
+            else {
+                std.log.info("\t↳ (unknown event, {} bytes ignored)\n", .{payload_left});
+            }
+            
+            if(payload_left > 0) std.log.warn("↳ skipped {} bytes during event parsing\n", .{payload_left});
+            moving_ptr += payload_size;
+            msg_len -= payload_size;
         }
     }
 }
