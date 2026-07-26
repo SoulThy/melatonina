@@ -12,12 +12,13 @@ const wayland_wl_registry_bind_opcode : u16 = 0;
 var wayland_rolling_object_id : u32 = 1;
 
 const WaylandMessageHeader = extern struct {
-    object_id : u32 = undefined,
+    object_id       : u32 = undefined,
     size_and_opcode : u32 = undefined,
 };
 
 const State = struct {
     wl_registry : u32 = undefined,
+    sync_id     : u32 = undefined,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -26,10 +27,10 @@ pub fn main(init: std.process.Init) !void {
 
     var state = State{
         .wl_registry = try wayland_wl_display_get_registry(fd),
+        .sync_id = try wayland_wl_display_sync(fd),
     };
 
-    const sync_id = try wayland_wl_display_sync(fd);
-    try wayland_read_event_message(fd, &state, sync_id);
+    try wayland_read_event_message(fd, &state);
 
     // for the next steps, i added:
     // const wayland_wl_display_sync_opcode : u16 = 0;
@@ -167,7 +168,7 @@ pub fn wayland_wl_display_sync(fd: linux.fd_t) !u32 {
 /// based on the received event.
 /// It keeps reading using syscalls (not optimal, should use shared memory)
 /// untils the sync event gets returned.
-pub fn wayland_read_event_message(fd: linux.fd_t, state: *State, sync_id: u32) !void {
+pub fn wayland_read_event_message(fd: linux.fd_t, state: *State) !void {
     var buffer : [4096]u8 align(4) = undefined;
     var synced = false;
 
@@ -189,7 +190,7 @@ pub fn wayland_read_event_message(fd: linux.fd_t, state: *State, sync_id: u32) !
 
             if(msg_len < payload_size) return error.IncompleteWaylandPayload;
 
-            std.log.info("object_id {d:>10}\t size {d:>6}\t opcode {d:>6}\n", .{object_id, size, opcode});
+            std.log.info("object_id {d:>10}\t size {d:>6}\t opcode {d:>6}", .{object_id, size, opcode});
 
             var payload_ptr : [*]u8 = moving_ptr; 
             var payload_left = payload_size;
@@ -200,7 +201,7 @@ pub fn wayland_read_event_message(fd: linux.fd_t, state: *State, sync_id: u32) !
                 const version   : u32        = try buf_read_u32(&payload_ptr, &payload_left);
                 std.log.info("\t↳ (name: {},interface: {s},version: {})\n", .{name, interface, version});
             }
-            else if(object_id == sync_id and opcode == wayland_wl_callback_event_done_opcode){
+            else if(object_id == state.*.sync_id and opcode == wayland_wl_callback_event_done_opcode){
                 const callback_data : u32 = try buf_read_u32(&payload_ptr, &payload_left);
                 synced = true;
                 std.log.info("\t↳ (callback_data: {})\n", .{callback_data});
