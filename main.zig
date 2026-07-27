@@ -8,6 +8,7 @@ const wayland_wl_display_get_registry_opcode : u16 = 1;
 const wayland_wl_display_event_delete_id_opcode : u16 = 1;
 const wayland_wl_display_sync_opcode : u16 = 0;
 const wayland_wl_registry_bind_opcode : u16 = 0;
+const wayland_wl_display_event_error_opcode : u16 = 0;
 
 var wayland_rolling_object_id : u32 = 1;
 
@@ -108,29 +109,46 @@ pub fn wayland_display_connect(env: *std.process.Environ.Map, gpa: std.mem.Alloc
 /// ref: https://wayland.freedesktop.org/docs/book/Protocol.html#wire-format
 /// ref: https://wayland-book.com/registry.html
 pub fn wayland_send_request(fd: linux.fd_t, object_id: u32, opcode: u16, args: anytype) !void{
-    const field_types = @typeInfo(@TypeOf(args)).@"struct".field_types;
-    comptime var payload_size: usize = 0;
-    inline for(field_types) |field_type| payload_size += @sizeOf(field_type);
+    const struct_info = @typeInfo(@TypeOf(args)).@"struct";
+    const field_names = struct_info.field_names;
+    const field_types = struct_info.field_types;
 
-    const total_size : u16 = @sizeOf(WaylandMessageHeader) + payload_size;
+    var payload_size: usize = 0;
+    inline for(field_types, field_names) |f_type, f_name| {
+        switch(f_type) {
+            []u8, []const u8 => payload_size += @field(args, f_name).len,
+            else             => payload_size += @sizeOf(f_type),
+        }
+    }
+
+    const total_size : u16 = @intCast(@sizeOf(WaylandMessageHeader) + payload_size);
     const header = WaylandMessageHeader{
         .object_id = object_id,
         .size_and_opcode = @as(u32, total_size) << 16 | opcode,
     };
 
-    const field_names = @typeInfo(@TypeOf(args)).@"struct".field_names;
-    var payload : [payload_size]u8 = undefined;
-    comptime var offset : usize = 0;
-    inline for(field_names) |field_name| {
-        const value = @field(args, field_name);
-        const bytes = std.mem.asBytes(&value);
-        @memcpy(payload[offset..(offset+bytes.len)], bytes);
-        offset += bytes.len;
+    var buffer : [256]u8 = undefined;
+    if(total_size > buffer.len) return error.BufferTooSmall;
+
+    @memcpy(buffer[0..@sizeOf(WaylandMessageHeader)], std.mem.asBytes(&header));
+    var offset : usize = @sizeOf(WaylandMessageHeader);
+
+    inline for(field_types, field_names) |f_type, f_name| {
+        const value = @field(args, f_name);
+        switch(f_type) {
+            []u8, []const u8 => {
+                @memcpy(buffer[offset..(offset+value.len)], value);
+                offset += value.len;
+            },
+            else => {
+                const bytes = std.mem.asBytes(&value);
+                @memcpy(buffer[offset..(offset+bytes.len)], bytes);
+                offset += bytes.len;
+            },
+        }
     }
 
-    const buffer = std.mem.asBytes(&header) ++ payload;
-
-    const result = linux.sendto(fd, buffer, total_size, linux.MSG.DONTWAIT, null, 0);
+    const result = linux.sendto(fd, &buffer, total_size, linux.MSG.DONTWAIT, null, 0);
     if(linux.errno(result) != .SUCCESS) {
         std.log.err("errno: {}", .{linux.errno(result)});
         return error.WaylandSendToFailed;
@@ -176,11 +194,21 @@ pub fn wayland_wl_display_sync(fd: linux.fd_t) !u32 {
 /// This bind enables us to make requests to the just binded interface.
 /// The function has the responsability of incrementing `wayland_rolling_object_id` 
 /// before using it as `object_id` and then returning it to caller.
-pub fn wayland_wl_registry_bind(fd: linux.fd_t, wl_registry_obj_id: u32, name: u32, interface: []const u8, version: u32) !u32 {
+pub fn wayland_wl_registry_bind(fd: linux.fd_t, wl_registry_obj_id: u32, name: u32, interface: [:0]const u8, version: u32) !u32 {
     wayland_rolling_object_id += 1;
     const new_id = wayland_rolling_object_id;
 
-    try wayland_send_request(fd, wl_registry_obj_id, wayland_wl_registry_bind_opcode, .{name,interface,version,new_id});
+    var new_id_buffer : [128]u8 = undefined;
+    var moving_ptr : [*]u8 = &new_id_buffer;
+    var moving_len = new_id_buffer.len;
+
+    try buf_write_string(&moving_ptr, &moving_len, interface);
+    try buf_write_u32(&moving_ptr, &moving_len, version);
+    try buf_write_u32(&moving_ptr, &moving_len, new_id);
+
+    const used : usize = new_id_buffer.len - moving_len;
+
+    try wayland_send_request(fd, wl_registry_obj_id, wayland_wl_registry_bind_opcode, .{name,new_id_buffer[0..used]});
 
     std.log.info("wl_registry@{}.bind: name={} interface={s} version={} id={}", .{wl_registry_obj_id, name, interface, version, new_id});
 
@@ -229,7 +257,7 @@ pub fn wayland_read_event_message(fd: linux.fd_t, state: *State) !void {
 
             if(object_id == state.*.wl_registry and opcode == wayland_wl_registry_event_global_opcode){
                 const name      : u32        = try buf_read_u32(&payload_ptr, &payload_left);
-                const interface : []const u8 = try buf_read_string(&payload_ptr, &payload_left);
+                const interface : [:0]const u8 = try buf_read_string(&payload_ptr, &payload_left);
                 const version   : u32        = try buf_read_u32(&payload_ptr, &payload_left);
                 std.log.info("\t↳ (name: {},interface: {s},version: {})", .{name, interface, version});
 
@@ -251,6 +279,12 @@ pub fn wayland_read_event_message(fd: linux.fd_t, state: *State) !void {
                 const deleted_id : u32 = try buf_read_u32(&payload_ptr, &payload_left);
                 std.log.info("\t↳ (deleted_id: {})\n", .{deleted_id});
             }
+            else if(object_id == wayland_display_object_id and opcode == wayland_wl_display_event_error_opcode){
+                const bad_object_id : u32          = try buf_read_u32(&payload_ptr, &payload_left);
+                const code          : u32          = try buf_read_u32(&payload_ptr, &payload_left);
+                const message       : [:0]const u8 = try buf_read_string(&payload_ptr, &payload_left);
+                std.log.err("\t↳ wl_display.error: object_id={} code={} message={s}", .{bad_object_id, code, message});
+            }
             else {
                 std.log.info("\t↳ (unknown event, {} bytes ignored)", .{payload_left});
             }
@@ -264,11 +298,11 @@ pub fn wayland_read_event_message(fd: linux.fd_t, state: *State) !void {
 
 pub fn buf_write_string(buf: *[*]u8, buf_size: *usize, value: [:0]const u8) !void{
     // this length, has to include the null terminator.
-    const length : u32 = value.len + 1;
+    const length : u32 = @intCast(value.len + 1);
     const padding = (4 - (length % 4)) % 4;
-    const total : usize = @sizeOf(length) + length + padding;
+    const total : usize = @sizeOf(u32) + length + padding;
 
-    if(buf_size < total) return error.BufferSizeTooSmall;
+    if(buf_size.* < total) return error.BufferSizeTooSmall;
 
     try buf_write_u32(buf, buf_size, length);
 
