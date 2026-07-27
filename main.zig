@@ -103,6 +103,9 @@ pub fn wayland_display_connect(env: *std.process.Environ.Map, gpa: std.mem.Alloc
 
 /// This functions sends a request to the socket pointed by
 /// the file descriptor following the wire protocol format.
+///
+/// ref: https://wayland.freedesktop.org/docs/book/Protocol.html#wire-format
+/// ref: https://wayland-book.com/registry.html
 pub fn wayland_send_request(fd: linux.fd_t, object_id: u32, opcode: u16, args: anytype) !void{
     const field_types = @typeInfo(@TypeOf(args)).@"struct".field_types;
     comptime var payload_size: usize = 0;
@@ -133,13 +136,10 @@ pub fn wayland_send_request(fd: linux.fd_t, object_id: u32, opcode: u16, args: a
 /// might want to: make rolling id a function
 ///
 /// This function sends a wayland message to the connected socket to obtain a 
-/// global registry object following the wire protocol format.
+/// global registry object.
 /// This is done by making a `get_registry` request to the `wl_display` interface. 
 /// The function has the responsability of incrementing `wayland_rolling_object_id` 
 /// before using it as `object_id` and then returning it to caller.
-///
-/// ref: https://wayland.freedesktop.org/docs/book/Protocol.html#wire-format
-/// ref: https://wayland-book.com/registry.html
 pub fn wayland_wl_display_get_registry(fd: linux.fd_t) !u32 {
     wayland_rolling_object_id += 1;
     const new_id = wayland_rolling_object_id;
@@ -151,7 +151,7 @@ pub fn wayland_wl_display_get_registry(fd: linux.fd_t) !u32 {
 } 
 
 /// This function sends a wayland message to the connected socket to send a 
-/// sync request following the wire protocol format.
+/// sync request.
 /// This sync object is then used when reading events to ensure
 /// that all the information we expect to receive from the server
 /// has been sent.
@@ -168,7 +168,7 @@ pub fn wayland_wl_display_sync(fd: linux.fd_t) !u32 {
 } 
 
 /// This function sends a wayland message to the connected socket to send a 
-/// bind request following the wire protocol format.
+/// bind request.
 /// This bind enables us to make requests to the just binded interface.
 /// The function has the responsability of incrementing `wayland_rolling_object_id` 
 /// before using it as `object_id` and then returning it to caller.
