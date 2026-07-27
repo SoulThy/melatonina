@@ -34,7 +34,7 @@ const WaylandClient = struct {
 };
 
 pub fn main(init: std.process.Init) !void {
-    const fd = try wayland_display_connect(init.environ_map, init.gpa);
+    const fd = try wayland_display_connect(init.environ_map);
     defer _ = linux.close(fd);
 
     var client = WaylandClient{
@@ -80,12 +80,24 @@ pub fn main(init: std.process.Init) !void {
 /// This function creates and connects a Unix domain socket to enable
 /// future communication with the wayland interface.
 /// If successful, returns the file descriptor to the socket.
-pub fn wayland_display_connect(env: *std.process.Environ.Map, gpa: std.mem.Allocator) !linux.fd_t {
+pub fn wayland_display_connect(env: *std.process.Environ.Map) !linux.fd_t {
     const xdg_runtime = env.get("XDG_RUNTIME_DIR") orelse return error.MissingXdgRuntimeDir;
     const wayland_display = env.get("WAYLAND_DISPLAY") orelse return error.MissingWaylandDisplay;
 
-    const wayland_socket_path = try std.mem.concat(gpa, u8, &.{xdg_runtime, "/", wayland_display});
-    defer gpa.free(wayland_socket_path);
+    const total_len = xdg_runtime.len + 1 + wayland_display.len;
+
+    var addr = linux.sockaddr.un {
+        .family = linux.AF.UNIX,
+        .path = undefined,
+    };
+    
+    if(total_len >= addr.path.len) return error.WaylandSocketPathTooLong;
+
+    // path -> "xdg_runtime" + "/" + "wayland_display"
+    @memset(addr.path[0..], 0);
+    @memcpy(addr.path[0..xdg_runtime.len], xdg_runtime);
+    addr.path[xdg_runtime.len] = '/';
+    @memcpy(addr.path[xdg_runtime.len + 1 .. total_len], wayland_display);
 
     var result = linux.socket(linux.AF.UNIX, linux.SOCK.STREAM, 0);
     const fd: linux.fd_t = switch(linux.errno(result)){
@@ -94,20 +106,8 @@ pub fn wayland_display_connect(env: *std.process.Environ.Map, gpa: std.mem.Alloc
     };
     errdefer _ = linux.close(fd);
 
-    var addr = linux.sockaddr.un{
-        .family = linux.AF.UNIX,
-        .path = undefined,
-    };
-
-    if(wayland_socket_path.len >= addr.path.len){
-        return error.WaylandSocketPathTooLong;
-    }
-
-    @memset(addr.path[0..], 0);
-    @memcpy(addr.path[0..wayland_socket_path.len], wayland_socket_path);
-    const addr_len = @offsetOf(linux.sockaddr.un, "path") + wayland_socket_path.len;
-
-    result = linux.connect(fd, @ptrCast(&addr), @as(linux.socklen_t, @intCast(addr_len)));
+    const addr_len = @offsetOf(linux.sockaddr.un, "path") + total_len;
+    result = linux.connect(fd, &addr, @intCast(addr_len));
     if(linux.errno(result) != .SUCCESS) return error.SocketConnectionFailed;
 
     std.log.info("fd to socket: {}", .{fd});
@@ -172,7 +172,6 @@ pub fn wayland_send_request(fd: linux.fd_t, object_id: u32, opcode: u16, args: a
 /// The function has the responsability of incrementing `wayland_rolling_object_id` 
 /// before using it as `object_id` and then returning it to caller.
 pub fn wayland_wl_display_get_registry(client: *WaylandClient) !u32 {
-
     const new_id = client.allocateId();
 
     try wayland_send_request(client.fd, wayland_display_object_id, wayland_wl_display_get_registry_opcode, .{new_id});
