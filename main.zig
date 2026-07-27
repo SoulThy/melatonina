@@ -17,9 +17,10 @@ const WaylandMessageHeader = extern struct {
 };
 
 const State = struct {
-    wl_registry : u32 = undefined,
-    wl_output  : u32 = undefined,
-    sync_id     : u32 = undefined,
+    wl_registry                   : u32 = undefined,
+    wl_output                     : u32 = undefined,
+    zwlr_gamma_control_manager_v1 : u32 = undefined,
+    sync_id                       : u32 = undefined,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -130,7 +131,10 @@ pub fn wayland_send_request(fd: linux.fd_t, object_id: u32, opcode: u16, args: a
     const buffer = std.mem.asBytes(&header) ++ payload;
 
     const result = linux.sendto(fd, buffer, total_size, linux.MSG.DONTWAIT, null, 0);
-    if(linux.errno(result) != .SUCCESS) return error.WaylandSendToFailed;
+    if(linux.errno(result) != .SUCCESS) {
+        std.log.err("errno: {}", .{linux.errno(result)});
+        return error.WaylandSendToFailed;
+    }
 }
 
 /// might want to: make rolling id a function
@@ -172,13 +176,14 @@ pub fn wayland_wl_display_sync(fd: linux.fd_t) !u32 {
 /// This bind enables us to make requests to the just binded interface.
 /// The function has the responsability of incrementing `wayland_rolling_object_id` 
 /// before using it as `object_id` and then returning it to caller.
-pub fn wayland_wl_registry_bind(fd: linux.fd_t, wl_registry_obj_id: u32, name: u32) !u32 {
+pub fn wayland_wl_registry_bind(fd: linux.fd_t, wl_registry_obj_id: u32, name: u32, interface: []const u8, version: u32) !u32 {
     wayland_rolling_object_id += 1;
     const new_id = wayland_rolling_object_id;
 
-    try wayland_send_request(fd, wl_registry_obj_id, wayland_wl_registry_bind_opcode, .{name, new_id});
+    try wayland_send_request(fd, wl_registry_obj_id, wayland_wl_registry_bind_opcode, .{name,interface,version,new_id});
 
-    std.log.info("wl_registry@{}.bind: bind={}", .{wayland_display_object_id, wayland_rolling_object_id});
+    std.log.info("wl_registry@{}.bind: name={} interface={s} version={} id={}", .{wl_registry_obj_id, name, interface, version, new_id});
+
     return new_id;
 }
 
@@ -231,7 +236,10 @@ pub fn wayland_read_event_message(fd: linux.fd_t, state: *State) !void {
                 // todo: this is starting to look like 'if' nesting hell, could
                 // probably use a string hashmap instead. But for now will do.
                 if(std.mem.eql(u8, interface, "wl_output")){
-                    state.*.wl_output = try wayland_wl_registry_bind(fd, state.*.wl_registry, name);
+                    state.*.wl_output = try wayland_wl_registry_bind(fd, state.*.wl_registry, name, interface, version);
+                }
+                else if(std.mem.eql(u8, interface, "zwlr_gamma_control_manager_v1")){
+                    state.*.zwlr_gamma_control_manager_v1 = try wayland_wl_registry_bind(fd, state.*.wl_registry, name, interface, version);
                 }
             }
             else if(object_id == state.*.sync_id and opcode == wayland_wl_callback_event_done_opcode){
@@ -254,14 +262,42 @@ pub fn wayland_read_event_message(fd: linux.fd_t, state: *State) !void {
     }
 }
 
-pub fn buf_read_string(buf: *[*]u8, buf_size: *usize) ![]const u8{
+pub fn buf_write_string(buf: *[*]u8, buf_size: *usize, value: [:0]const u8) !void{
+    // this length, has to include the null terminator.
+    const length : u32 = value.len + 1;
+    const padding = (4 - (length % 4)) % 4;
+    const total : usize = @sizeOf(length) + length + padding;
+
+    if(buf_size < total) return error.BufferSizeTooSmall;
+
+    try buf_write_u32(buf, buf_size, length);
+
+    const with_terminator = value[0..value.len + 1];
+    @memcpy(buf.*[0..with_terminator.len], with_terminator);
+    buf.* += with_terminator.len;
+    buf_size.* -= with_terminator.len;
+
+    @memset(buf.*[0..padding], 0);
+    buf.* += padding;
+    buf_size.* -= padding;
+}
+
+pub fn buf_write_u32(buf: *[*]u8, buf_size: *usize, value: u32) !void{
+    if(buf_size.* < @sizeOf(u32)) return error.BufferSizeTooSmall;
+
+    std.mem.writeInt(u32, buf.*[0..4], value, .little);
+    buf.* += @sizeOf(u32);
+    buf_size.* -= @sizeOf(u32);
+}
+
+pub fn buf_read_string(buf: *[*]u8, buf_size: *usize) ![:0]const u8{
     // this length, includes null terminator.
     const length = try buf_read_u32(buf, buf_size);
 
     if(length == 0) return "";
     if(buf_size.* < length) return error.BufferSizeTooSmall;
 
-    const string : []const u8 = buf.*[0..length-1];
+    const string : [:0]const u8 = buf.*[0..length-1 :0];
     buf.* += length;
     buf_size.* -= length;
 
