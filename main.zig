@@ -1,14 +1,14 @@
 const std = @import("std");
 const linux = std.os.linux;
 
-const wayland_wl_registry_event_global_opcode : u16 = 0;
-const wayland_wl_callback_event_done_opcode : u16 = 0;
-const wayland_display_object_id : u32 = 1;
-const wayland_wl_display_get_registry_opcode : u16 = 1;
+const wayland_wl_registry_event_global_opcode   : u16 = 0;
+const wayland_wl_callback_event_done_opcode     : u16 = 0;
+const wayland_display_object_id                 : u32 = 1;
+const wayland_wl_display_get_registry_opcode    : u16 = 1;
+const wayland_wl_display_event_error_opcode     : u16 = 0;
 const wayland_wl_display_event_delete_id_opcode : u16 = 1;
-const wayland_wl_display_sync_opcode : u16 = 0;
-const wayland_wl_registry_bind_opcode : u16 = 0;
-const wayland_wl_display_event_error_opcode : u16 = 0;
+const wayland_wl_display_sync_opcode            : u16 = 0;
+const wayland_wl_registry_bind_opcode           : u16 = 0;
 
 var wayland_rolling_object_id : u32 = 1;
 
@@ -17,23 +17,34 @@ const WaylandMessageHeader = extern struct {
     size_and_opcode : u32 = undefined,
 };
 
-const State = struct {
-    wl_registry                   : u32 = undefined,
-    wl_output                     : u32 = undefined,
-    zwlr_gamma_control_manager_v1 : u32 = undefined,
-    sync_id                       : u32 = undefined,
+const WaylandClient = struct {
+    fd             : linux.fd_t,
+    next_object_id : u32 = 2,
+
+    wl_registry                   : u32 = 0,
+    wl_output                     : u32 = 0,
+    zwlr_gamma_control_manager_v1 : u32 = 0,
+    sync_id                       : u32 = 0,
+
+    pub fn allocateId(self: *WaylandClient) u32 {
+        const id = self.next_object_id;
+        self.next_object_id += 1;
+        return id;
+    }
 };
 
 pub fn main(init: std.process.Init) !void {
     const fd = try wayland_display_connect(init.environ_map, init.gpa);
     defer _ = linux.close(fd);
 
-    var state = State{
-        .wl_registry = try wayland_wl_display_get_registry(fd),
-        .sync_id = try wayland_wl_display_sync(fd),
+    var client = WaylandClient{
+        .fd = fd,
     };
 
-    try wayland_read_event_message(fd, &state);
+    client.wl_registry = try wayland_wl_display_get_registry(&client);
+    client.sync_id     = try wayland_wl_display_sync(&client);
+
+    try wayland_read_event_message(&client);
 
     // for the next steps, i added:
     // const wayland_wl_display_sync_opcode : u16 = 0;
@@ -155,18 +166,16 @@ pub fn wayland_send_request(fd: linux.fd_t, object_id: u32, opcode: u16, args: a
     }
 }
 
-/// might want to: make rolling id a function
-///
 /// This function sends a wayland message to the connected socket to obtain a 
 /// global registry object.
 /// This is done by making a `get_registry` request to the `wl_display` interface. 
 /// The function has the responsability of incrementing `wayland_rolling_object_id` 
 /// before using it as `object_id` and then returning it to caller.
-pub fn wayland_wl_display_get_registry(fd: linux.fd_t) !u32 {
-    wayland_rolling_object_id += 1;
-    const new_id = wayland_rolling_object_id;
+pub fn wayland_wl_display_get_registry(client: *WaylandClient) !u32 {
 
-    try wayland_send_request(fd, wayland_display_object_id, wayland_wl_display_get_registry_opcode, .{new_id});
+    const new_id = client.allocateId();
+
+    try wayland_send_request(client.fd, wayland_display_object_id, wayland_wl_display_get_registry_opcode, .{new_id});
 
     std.log.info("wl_display@{}.get_registry: wl_registry={}", .{wayland_display_object_id, wayland_rolling_object_id});
     return new_id;
@@ -179,11 +188,10 @@ pub fn wayland_wl_display_get_registry(fd: linux.fd_t) !u32 {
 /// has been sent.
 /// The function has the responsability of incrementing `wayland_rolling_object_id` 
 /// before using it as `object_id` and then returning it to caller.
-pub fn wayland_wl_display_sync(fd: linux.fd_t) !u32 {
-    wayland_rolling_object_id += 1;
-    const new_id = wayland_rolling_object_id;
+pub fn wayland_wl_display_sync(client: *WaylandClient) !u32 {
+    const new_id = client.allocateId();
 
-    try wayland_send_request(fd, wayland_display_object_id, wayland_wl_display_sync_opcode, .{new_id});
+    try wayland_send_request(client.fd, wayland_display_object_id, wayland_wl_display_sync_opcode, .{new_id});
 
     std.log.info("wl_display@{}.sync: sync={}", .{wayland_display_object_id, wayland_rolling_object_id});
     return new_id;
@@ -194,9 +202,8 @@ pub fn wayland_wl_display_sync(fd: linux.fd_t) !u32 {
 /// This bind enables us to make requests to the just binded interface.
 /// The function has the responsability of incrementing `wayland_rolling_object_id` 
 /// before using it as `object_id` and then returning it to caller.
-pub fn wayland_wl_registry_bind(fd: linux.fd_t, wl_registry_obj_id: u32, name: u32, interface: [:0]const u8, version: u32) !u32 {
-    wayland_rolling_object_id += 1;
-    const new_id = wayland_rolling_object_id;
+pub fn wayland_wl_registry_bind(client: *WaylandClient, name: u32, interface: [:0]const u8, version: u32) !u32 {
+    const new_id = client.allocateId();
 
     var new_id_buffer : [128]u8 = undefined;
     var moving_ptr : [*]u8 = &new_id_buffer;
@@ -208,9 +215,9 @@ pub fn wayland_wl_registry_bind(fd: linux.fd_t, wl_registry_obj_id: u32, name: u
 
     const used : usize = new_id_buffer.len - moving_len;
 
-    try wayland_send_request(fd, wl_registry_obj_id, wayland_wl_registry_bind_opcode, .{name,new_id_buffer[0..used]});
+    try wayland_send_request(client.fd, client.wl_registry, wayland_wl_registry_bind_opcode, .{name,new_id_buffer[0..used]});
 
-    std.log.info("wl_registry@{}.bind: name={} interface={s} version={} id={}", .{wl_registry_obj_id, name, interface, version, new_id});
+    std.log.info("wl_registry@{}.bind: name={} interface={s} version={} id={}", .{client.wl_registry, name, interface, version, new_id});
 
     return new_id;
 }
@@ -227,12 +234,12 @@ pub fn wayland_wl_registry_bind(fd: linux.fd_t, wl_registry_obj_id: u32, name: u
 /// based on the received event.
 /// It keeps reading using syscalls (not optimal, should use shared memory)
 /// untils the sync event gets returned.
-pub fn wayland_read_event_message(fd: linux.fd_t, state: *State) !void {
+pub fn wayland_read_event_message(client: *WaylandClient) !void {
     var buffer : [4096]u8 = undefined;
     var synced = false;
 
     while(synced == false){
-        const result = linux.recvfrom(fd, &buffer, buffer.len, 0, null, null);
+        const result = linux.recvfrom(client.fd, &buffer, buffer.len, 0, null, null);
         if(linux.errno(result) != .SUCCESS) return error.SocketConsumeWaylandHeaderFailed;
         
         var moving_ptr : [*]u8 = &buffer; 
@@ -255,7 +262,7 @@ pub fn wayland_read_event_message(fd: linux.fd_t, state: *State) !void {
             var payload_ptr : [*]u8 = moving_ptr; 
             var payload_left = payload_size;
 
-            if(object_id == state.*.wl_registry and opcode == wayland_wl_registry_event_global_opcode){
+            if(object_id == client.wl_registry and opcode == wayland_wl_registry_event_global_opcode){
                 const name      : u32        = try buf_read_u32(&payload_ptr, &payload_left);
                 const interface : [:0]const u8 = try buf_read_string(&payload_ptr, &payload_left);
                 const version   : u32        = try buf_read_u32(&payload_ptr, &payload_left);
@@ -264,13 +271,13 @@ pub fn wayland_read_event_message(fd: linux.fd_t, state: *State) !void {
                 // todo: this is starting to look like 'if' nesting hell, could
                 // probably use a string hashmap instead. But for now will do.
                 if(std.mem.eql(u8, interface, "wl_output")){
-                    state.*.wl_output = try wayland_wl_registry_bind(fd, state.*.wl_registry, name, interface, version);
+                    client.wl_output = try wayland_wl_registry_bind(client, name, interface, version);
                 }
                 else if(std.mem.eql(u8, interface, "zwlr_gamma_control_manager_v1")){
-                    state.*.zwlr_gamma_control_manager_v1 = try wayland_wl_registry_bind(fd, state.*.wl_registry, name, interface, version);
+                    client.zwlr_gamma_control_manager_v1 = try wayland_wl_registry_bind(client, name, interface, version);
                 }
             }
-            else if(object_id == state.*.sync_id and opcode == wayland_wl_callback_event_done_opcode){
+            else if(object_id == client.sync_id and opcode == wayland_wl_callback_event_done_opcode){
                 const callback_data : u32 = try buf_read_u32(&payload_ptr, &payload_left);
                 synced = true;
                 std.log.info("\t↳ (callback_data: {})", .{callback_data});
