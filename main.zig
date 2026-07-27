@@ -204,17 +204,16 @@ pub fn wayland_wl_display_sync(client: *WaylandClient) !u32 {
 pub fn wayland_wl_registry_bind(client: *WaylandClient, name: u32, interface: [:0]const u8, version: u32) !u32 {
     const new_id = client.allocateId();
 
-    var new_id_buffer : [128]u8 = undefined;
-    var moving_ptr : [*]u8 = &new_id_buffer;
-    var moving_len = new_id_buffer.len;
+    var buffer : [128]u8 = undefined;
 
-    try buf_write_string(&moving_ptr, &moving_len, interface);
-    try buf_write_u32(&moving_ptr, &moving_len, version);
-    try buf_write_u32(&moving_ptr, &moving_len, new_id);
+    var writer = std.Io.Writer.fixed(&buffer);
+    try buf_write_string(&writer, interface);
+    try buf_write_u32(&writer, version);
+    try buf_write_u32(&writer, new_id);
 
-    const used : usize = new_id_buffer.len - moving_len;
+    const full_new_id = writer.buffer[0..writer.end];
 
-    try wayland_send_request(client.fd, client.wl_registry, wayland_wl_registry_bind_opcode, .{name,new_id_buffer[0..used]});
+    try wayland_send_request(client.fd, client.wl_registry, wayland_wl_registry_bind_opcode, .{name,full_new_id});
 
     std.log.info("wl_registry@{}.bind: name={} interface={s} version={} id={}", .{client.wl_registry, name, interface, version, new_id});
 
@@ -302,32 +301,19 @@ pub fn wayland_read_event_message(client: *WaylandClient) !void {
     }
 }
 
-pub fn buf_write_string(buf: *[*]u8, buf_size: *usize, value: [:0]const u8) !void{
-    // this length, has to include the null terminator.
-    const length : u32 = @intCast(value.len + 1);
-    const padding = (4 - (length % 4)) % 4;
-    const total : usize = @sizeOf(u32) + length + padding;
-
-    if(buf_size.* < total) return error.BufferSizeTooSmall;
-
-    try buf_write_u32(buf, buf_size, length);
-
-    const with_terminator = value[0..value.len + 1];
-    @memcpy(buf.*[0..with_terminator.len], with_terminator);
-    buf.* += with_terminator.len;
-    buf_size.* -= with_terminator.len;
-
-    @memset(buf.*[0..padding], 0);
-    buf.* += padding;
-    buf_size.* -= padding;
+pub fn buf_write_u32(writer: *std.Io.Writer, value: u32) !void {
+    try writer.writeInt(u32, value, .little);
 }
 
-pub fn buf_write_u32(buf: *[*]u8, buf_size: *usize, value: u32) !void{
-    if(buf_size.* < @sizeOf(u32)) return error.BufferSizeTooSmall;
+pub fn buf_write_string(writer: *std.Io.Writer, str: [:0]const u8) !void {
+    // this length, includes null terminator.
+    const len: u32 = @intCast(str.len + 1);
+    const padding = (4 - (len % 4)) % 4;
+    const zeroes = [3]u8{ 0, 0, 0 };
 
-    std.mem.writeInt(u32, buf.*[0..4], value, .little);
-    buf.* += @sizeOf(u32);
-    buf_size.* -= @sizeOf(u32);
+    try writer.writeInt(u32, len, .little);
+    try writer.writeAll(str[0 .. str.len + 1]);
+    try writer.writeAll(zeroes[0..padding]);
 }
 
 pub fn buf_read_string(buf: *[*]u8, buf_size: *usize) ![:0]const u8{
