@@ -93,11 +93,7 @@ pub fn wayland_display_connect(env: *std.process.Environ.Map) !linux.fd_t {
     
     if(total_len >= addr.path.len) return error.WaylandSocketPathTooLong;
 
-    // path -> "xdg_runtime" + "/" + "wayland_display"
-    @memset(addr.path[0..], 0);
-    @memcpy(addr.path[0..xdg_runtime.len], xdg_runtime);
-    addr.path[xdg_runtime.len] = '/';
-    @memcpy(addr.path[xdg_runtime.len + 1 .. total_len], wayland_display);
+    _ = try std.mem.print(&addr.path, "{s}/{s}", .{xdg_runtime, wayland_display});
 
     var result = linux.socket(linux.AF.UNIX, linux.SOCK.STREAM, 0);
     const fd: linux.fd_t = switch(linux.errno(result)){
