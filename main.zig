@@ -235,35 +235,40 @@ pub fn wayland_wl_registry_bind(client: *WaylandClient, name: u32, interface: [:
 pub fn wayland_read_event_message(client: *WaylandClient) !void {
     var buffer : [4096]u8 = undefined;
     var synced = false;
-
-    while(synced == false){
+    
+    while(!synced){
         const result = linux.recvfrom(client.fd, &buffer, buffer.len, 0, null, null);
         if(linux.errno(result) != .SUCCESS) return error.SocketConsumeWaylandHeaderFailed;
+
+        var reader = std.Io.Reader.fixed(buffer[0..result]);
         
-        var moving_ptr : [*]u8 = &buffer; 
-        var msg_len : usize = result;
+        while((result - reader.seek) >= 8) {
+            const message_start = reader.seek;
 
-        while(msg_len > 0) {
-            if(msg_len < 8) return error.IncompleteWaylandHeader;
-
-            const object_id       : u32 = try buf_read_u32(&moving_ptr, &msg_len);
-            const size_and_opcode : u32 = try buf_read_u32(&moving_ptr, &msg_len);
+            const object_id       : u32 = try buf_read_u32(&reader);
+            const size_and_opcode : u32 = try buf_read_u32(&reader);
             const size            : u16 = @truncate(size_and_opcode >> 16);
             const opcode          : u16 = @truncate(size_and_opcode);
-            const payload_size    : usize = size - @sizeOf(WaylandMessageHeader);
 
-            if(msg_len < payload_size) return error.IncompleteWaylandPayload;
+            if(size < 8) return error.InvalidWaylandMessageSize;
+            
+            const message_end = message_start + size;
+            
+            // this condition can happen in 2 cases:
+            // 1. the recvfrom came "too early", the full data is not yet available
+            //    on the socket.
+            // 2. the buffer is full and we have a message split between syscalls.
+            //    in both cases we should save the bytes read and keep reading
+            //    implement ring buffer is a solution i think.
+            if(result < message_end) return error.IncompleteWaylandPayload;
 
             std.log.info("", .{});
             std.log.info("object_id {d:>10}\t size {d:>6}\t opcode {d:>6}", .{object_id, size, opcode});
 
-            var payload_ptr : [*]u8 = moving_ptr; 
-            var payload_left = payload_size;
-
             if(object_id == client.wl_registry and opcode == wayland_wl_registry_event_global_opcode){
-                const name      : u32        = try buf_read_u32(&payload_ptr, &payload_left);
-                const interface : [:0]const u8 = try buf_read_string(&payload_ptr, &payload_left);
-                const version   : u32        = try buf_read_u32(&payload_ptr, &payload_left);
+                const name      : u32          = try buf_read_u32(&reader);
+                const interface : [:0]const u8 = try buf_read_string(&reader);
+                const version   : u32          = try buf_read_u32(&reader);
                 std.log.info("\t↳ (name: {},interface: {s},version: {})", .{name, interface, version});
 
                 // todo: this is starting to look like 'if' nesting hell, could
@@ -274,29 +279,22 @@ pub fn wayland_read_event_message(client: *WaylandClient) !void {
                 else if(std.mem.eql(u8, interface, "zwlr_gamma_control_manager_v1")){
                     client.zwlr_gamma_control_manager_v1 = try wayland_wl_registry_bind(client, name, interface, version);
                 }
-            }
-            else if(object_id == client.sync_id and opcode == wayland_wl_callback_event_done_opcode){
-                const callback_data : u32 = try buf_read_u32(&payload_ptr, &payload_left);
+            } else if(object_id == client.sync_id and opcode == wayland_wl_callback_event_done_opcode){
+                const callback_data : u32 = try buf_read_u32(&reader);
                 synced = true;
                 std.log.info("\t↳ (callback_data: {})", .{callback_data});
-            }
-            else if(object_id == wayland_display_object_id and opcode == wayland_wl_display_event_delete_id_opcode){
-                const deleted_id : u32 = try buf_read_u32(&payload_ptr, &payload_left);
+            } else if(object_id == wayland_display_object_id and opcode == wayland_wl_display_event_delete_id_opcode){
+                const deleted_id : u32 = try buf_read_u32(&reader);
                 std.log.info("\t↳ (deleted_id: {})\n", .{deleted_id});
-            }
-            else if(object_id == wayland_display_object_id and opcode == wayland_wl_display_event_error_opcode){
-                const bad_object_id : u32          = try buf_read_u32(&payload_ptr, &payload_left);
-                const code          : u32          = try buf_read_u32(&payload_ptr, &payload_left);
-                const message       : [:0]const u8 = try buf_read_string(&payload_ptr, &payload_left);
+            } else if(object_id == wayland_display_object_id and opcode == wayland_wl_display_event_error_opcode){
+                const bad_object_id : u32          = try buf_read_u32(&reader);
+                const code          : u32          = try buf_read_u32(&reader);
+                const message       : [:0]const u8 = try buf_read_string(&reader);
                 std.log.err("\t↳ wl_display.error: object_id={} code={} message={s}", .{bad_object_id, code, message});
+            } else {
+                std.log.err("\t↳ (unknown event)", .{});
             }
-            else {
-                std.log.info("\t↳ (unknown event, {} bytes ignored)", .{payload_left});
-            }
-            
-            if(payload_left > 0) std.log.warn("↳ skipped {} bytes during event parsing", .{payload_left});
-            moving_ptr += payload_size;
-            msg_len -= payload_size;
+            reader.seek = message_end;
         }
     }
 }
@@ -316,31 +314,16 @@ pub fn buf_write_string(writer: *std.Io.Writer, str: [:0]const u8) !void {
     try writer.writeAll(zeroes[0..padding]);
 }
 
-pub fn buf_read_string(buf: *[*]u8, buf_size: *usize) ![:0]const u8{
-    // this length, includes null terminator.
-    const length = try buf_read_u32(buf, buf_size);
-
-    if(length == 0) return "";
-    if(buf_size.* < length) return error.BufferSizeTooSmall;
-
-    const string : [:0]const u8 = buf.*[0..length-1 :0];
-    buf.* += length;
-    buf_size.* -= length;
-
-    const padding = (4 - (length % 4)) % 4;
-    if(buf_size.* < padding) return error.BufferSizeTooSmall;
-    buf.* += padding;
-    buf_size.* -= padding;
-
-    return string;
+pub fn buf_read_u32(reader: *std.Io.Reader) !u32{
+    return try reader.takeInt(u32, .little);
 }
 
-pub fn buf_read_u32(buf: *[*]u8, buf_size: *usize) !u32{
-    if(buf_size.* < @sizeOf(u32)) return error.BufferSizeTooSmall;
+pub fn buf_read_string(reader: *std.Io.Reader) ![:0]const u8{
+    // this length, includes null terminator.
+    const len = try buf_read_u32(reader);
+    const string : [:0]const u8 = try reader.takeSentinel(0);
+    const padding = (4 - (len % 4)) % 4;
+    reader.toss(padding);
 
-    const result : u32 = std.mem.readInt(u32, @ptrCast(buf.*), .little);
-    buf.* += @sizeOf(u32);
-    buf_size.* -= @sizeOf(u32);
-
-    return result;
+    return string;
 }
