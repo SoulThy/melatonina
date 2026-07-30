@@ -1,14 +1,35 @@
 const std = @import("std");
 const linux = std.os.linux;
 
-const WL_REGISTRY_EVENT_GLOBAL_OPCODE   : u16 = 0;
-const WL_CALLBACK_EVENT_DONE_OPCODE     : u16 = 0;
-const DISPLAY_OBJECT_ID                 : u32 = 1;
-const WL_DISPLAY_GET_REGISTRY_OPCODE    : u16 = 1;
-const WL_DISPLAY_EVENT_ERROR_OPCODE     : u16 = 0;
-const WL_DISPLAY_EVENT_DELETE_ID_OPCODE : u16 = 1;
-const WL_DISPLAY_SYNC_OPCODE            : u16 = 0;
-const WL_REGISTRY_BIND_OPCODE           : u16 = 0;
+const WlDisplay = struct {
+    const object_id : u32 = 1;
+
+    const Request = enum(u16) {
+        sync = 0,
+        get_registry = 1,
+    };
+
+    const Event = enum(u16) {
+        @"error" = 0,
+        delete_id = 1,
+    };
+};
+
+const WlRegistry = struct {
+    const Request = enum(u16) {
+        bind = 0,
+    };
+
+    const Event = enum(u16) {
+        global = 0,
+    };
+};
+
+const WlCallback = struct {
+    const Event = enum(u16) {
+        done = 0,
+    };
+};
 
 const WaylandMessageHeader = extern struct {
     object_id       : u32 = undefined,
@@ -70,7 +91,13 @@ pub fn display_connect(env: *std.process.Environ.Map) !linux.fd_t {
 ///
 /// ref: https://wayland.freedesktop.org/docs/book/Protocol.html#wire-format
 /// ref: https://wayland-book.com/registry.html
-fn send_request(fd: linux.fd_t, object_id: u32, opcode: u16, args: anytype) !void{
+fn send_request(fd: linux.fd_t, object_id: u32, opcode: anytype, args: anytype) !void{
+    const raw_opcode : u16 = switch(@typeInfo(@TypeOf(opcode))) {
+        .@"enum" => @intFromEnum(opcode),
+        .comptime_int, .int =>  @intCast(opcode),
+        else => @compileError("invalid opcode, it has to be of type enum or int")
+    };
+
     const struct_info = @typeInfo(@TypeOf(args)).@"struct";
     const field_names = struct_info.field_names;
     const field_types = struct_info.field_types;
@@ -86,7 +113,7 @@ fn send_request(fd: linux.fd_t, object_id: u32, opcode: u16, args: anytype) !voi
     const total_size : u16 = @intCast(@sizeOf(WaylandMessageHeader) + payload_size);
     const header = WaylandMessageHeader{
         .object_id = object_id,
-        .size_and_opcode = @as(u32, total_size) << 16 | opcode,
+        .size_and_opcode = @as(u32, total_size) << 16 | raw_opcode,
     };
 
     var buffer : [256]u8 = undefined;
@@ -162,7 +189,7 @@ pub fn read_event_message(client: *WaylandClient) !void {
             std.log.info("", .{});
             std.log.info("object_id {d:>10}\t size {d:>6}\t opcode {d:>6}", .{object_id, size, opcode});
 
-            if(object_id == client.wl_registry and opcode == WL_REGISTRY_EVENT_GLOBAL_OPCODE){
+            if(object_id == client.wl_registry and opcode == @intFromEnum(WlRegistry.Event.global)){
                 const name      : u32          = try buf_read_u32(&reader);
                 const interface : [:0]const u8 = try buf_read_string(&reader);
                 const version   : u32          = try buf_read_u32(&reader);
@@ -176,14 +203,14 @@ pub fn read_event_message(client: *WaylandClient) !void {
                 else if(std.mem.eql(u8, interface, "zwlr_gamma_control_manager_v1")){
                     client.zwlr_gamma_control_manager_v1 = try wl_registry_bind(client, name, interface, version);
                 }
-            } else if(object_id == client.sync_id and opcode == WL_CALLBACK_EVENT_DONE_OPCODE){
+            } else if(object_id == client.sync_id and opcode == @intFromEnum(WlCallback.Event.done)){
                 const callback_data : u32 = try buf_read_u32(&reader);
                 synced = true;
                 std.log.info("\t↳ (callback_data: {})", .{callback_data});
-            } else if(object_id == DISPLAY_OBJECT_ID and opcode == WL_DISPLAY_EVENT_DELETE_ID_OPCODE){
+            } else if(object_id == WlDisplay.object_id and opcode == @intFromEnum(WlDisplay.Event.delete_id)){
                 const deleted_id : u32 = try buf_read_u32(&reader);
                 std.log.info("\t↳ (deleted_id: {})\n", .{deleted_id});
-            } else if(object_id == DISPLAY_OBJECT_ID and opcode == WL_DISPLAY_EVENT_ERROR_OPCODE){
+            } else if(object_id == WlDisplay.object_id and opcode == @intFromEnum(WlDisplay.Event.@"error")){
                 const bad_object_id : u32          = try buf_read_u32(&reader);
                 const code          : u32          = try buf_read_u32(&reader);
                 const message       : [:0]const u8 = try buf_read_string(&reader);
@@ -204,9 +231,9 @@ pub fn read_event_message(client: *WaylandClient) !void {
 pub fn wl_display_get_registry(client: *WaylandClient) !u32 {
     const new_id = client.allocateId();
 
-    try send_request(client.fd, DISPLAY_OBJECT_ID, WL_DISPLAY_GET_REGISTRY_OPCODE, .{new_id});
+    try send_request(client.fd, WlDisplay.object_id, WlDisplay.Request.get_registry, .{new_id});
 
-    std.log.info("wl_display@{}.get_registry: wl_registry={}", .{DISPLAY_OBJECT_ID, new_id});
+    std.log.info("wl_display@{}.get_registry: wl_registry={}", .{WlDisplay.object_id, new_id});
     return new_id;
 } 
 
@@ -220,9 +247,9 @@ pub fn wl_display_get_registry(client: *WaylandClient) !u32 {
 pub fn wl_display_sync(client: *WaylandClient) !u32 {
     const new_id = client.allocateId();
 
-    try send_request(client.fd, DISPLAY_OBJECT_ID, WL_DISPLAY_SYNC_OPCODE, .{new_id});
+    try send_request(client.fd, WlDisplay.object_id, WlDisplay.Request.sync, .{new_id});
 
-    std.log.info("wl_display@{}.sync: sync={}", .{DISPLAY_OBJECT_ID, new_id});
+    std.log.info("wl_display@{}.sync: sync={}", .{WlDisplay.object_id, new_id});
     return new_id;
 } 
 
@@ -243,7 +270,7 @@ pub fn wl_registry_bind(client: *WaylandClient, name: u32, interface: [:0]const 
 
     const full_new_id = writer.buffer[0..writer.end];
 
-    try send_request(client.fd, client.wl_registry, WL_REGISTRY_BIND_OPCODE, .{name,full_new_id});
+    try send_request(client.fd, client.wl_registry, WlRegistry.Request.bind, .{name,full_new_id});
 
     std.log.info("wl_registry@{}.bind: name={} interface={s} version={} id={}", .{client.wl_registry, name, interface, version, new_id});
 
