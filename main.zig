@@ -11,11 +11,14 @@ pub fn main(init: std.process.Init) !void {
     };
 
     client.wl_registry = try wl.wl_display_get_registry(&client);
-    client.sync_id = try wl.wl_display_sync(&client);
 
+    client.sync_id = try wl.wl_display_sync(&client);
     try wl.read_event_message(&client);
 
     client.zwlr_gamma_control_v1 = try wl.zwlr_gamma_control_manager_v1_get_gamma_control(&client);
+
+    client.sync_id = try wl.wl_display_sync(&client);
+    try wl.read_event_message(&client);
 
     // and we are going to use it to call
     // zwlr_gamma_control_v1::set_gamma(fd: fd)

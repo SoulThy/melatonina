@@ -37,6 +37,17 @@ const ZwlrGammaControlManagerV1 = struct {
     };
 };
 
+const ZwlrGammaControlV1 = struct {
+    const Request = enum(u16) {
+        set_gamma = 0,
+    };
+
+    const Event = enum(u16) {
+        gamma_size = 0,
+        failed = 1,
+    };
+};
+
 const WaylandMessageHeader = extern struct {
     object_id: u32 = undefined,
     size_and_opcode: u32 = undefined,
@@ -50,6 +61,7 @@ pub const WaylandClient = struct {
     wl_output: u32 = 0,
     zwlr_gamma_control_manager_v1: u32 = 0,
     zwlr_gamma_control_v1: u32 = 0,
+    zwlr_gamma_size: u32 = 0 ,
     sync_id: u32 = 0,
 
     pub fn allocateId(self: *WaylandClient) u32 {
@@ -251,6 +263,16 @@ fn event_dispatch(client: *WaylandClient, object_id: u32, opcode: u16, raw_paylo
                 std.log.info("\t↳ (deleted_id: {})\n", .{deleted_id});
             },
         }
+    } else if(object_id == client.zwlr_gamma_control_v1) {
+        switch (@as(ZwlrGammaControlV1.Event, @enumFromInt(opcode))) {
+            .gamma_size => {
+                client.zwlr_gamma_size = try buf_read_u32(&payload_reader);
+                std.log.info("\t↳ gamma_size: {}", .{client.zwlr_gamma_size});
+            },
+            .failed => {
+                std.log.err("Unable to obtain gamma ramp for this output display. Make sure that conflicting softwares (redshift, wlsusnet, ...) are not running.", .{});
+            },
+        }
     } else {
         std.log.err("\t↳ (unknown event)", .{});
     }
@@ -305,6 +327,7 @@ pub fn wl_registry_bind(client: *WaylandClient, name: u32, interface: [:0]const 
 
     try send_request(client.fd, client.wl_registry, WlRegistry.Request.bind, .{ name, full_new_id });
 
+    std.log.info("wl_registry@{}.bind: name={}, interface=\"{s}\", version={}, id={}", .{ client.wl_registry, name, interface, version, new_id, });
 
     return new_id;
 }
