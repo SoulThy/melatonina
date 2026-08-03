@@ -199,6 +199,8 @@ pub fn read_event_message(client: *WaylandClient) !void {
     }
 }
 
+/// This function uses object_id to determine the interface
+/// and opcode to determine the event to parse and interpret
 fn event_dispatch(client: *WaylandClient, object_id: u32, opcode: u16, raw_payload: []const u8, synced: *bool) !void {
     var payload_reader = std.Io.Reader.fixed(raw_payload);
 
