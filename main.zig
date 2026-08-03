@@ -15,12 +15,8 @@ pub fn main(init: std.process.Init) !void {
 
     try wl.read_event_message(&client);
 
-    // we can bind to wl_output using wl_registry_bind.
-    // Now that we have wl_output object we can call
-    // zwlr_gamma_control_manager_v1::get_gamma_control::get_gamma_control(
-    //      id: new_id<zwlr_gamma_control_v1>, output: object<wl_output>
-    // )
-    //
+    client.zwlr_gamma_control_v1 = try wl.zwlr_gamma_control_manager_v1_get_gamma_control(&client);
+
     // and we are going to use it to call
     // zwlr_gamma_control_v1::set_gamma(fd: fd)
     //

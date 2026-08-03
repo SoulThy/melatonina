@@ -31,6 +31,12 @@ const WlCallback = struct {
     };
 };
 
+const ZwlrGammaControlManagerV1 = struct {
+    const Request = enum(u16) {
+        get_gamma_control = 0,
+    };
+};
+
 const WaylandMessageHeader = extern struct {
     object_id: u32 = undefined,
     size_and_opcode: u32 = undefined,
@@ -43,6 +49,7 @@ pub const WaylandClient = struct {
     wl_registry: u32 = 0,
     wl_output: u32 = 0,
     zwlr_gamma_control_manager_v1: u32 = 0,
+    zwlr_gamma_control_v1: u32 = 0,
     sync_id: u32 = 0,
 
     pub fn allocateId(self: *WaylandClient) u32 {
@@ -281,7 +288,7 @@ pub fn wl_display_sync(client: *WaylandClient) !u32 {
 
 /// This function sends a wayland message to the connected socket to send a
 /// bind request.
-/// This bind enables us to make requests to the just binded interface.
+/// Binding enables us to use the object we just binded to.
 /// The function has the responsability of calling .allocateId();
 /// before using it as `object_id` and then returning it to caller.
 pub fn wl_registry_bind(client: *WaylandClient, name: u32, interface: [:0]const u8, version: u32) !u32 {
@@ -298,8 +305,24 @@ pub fn wl_registry_bind(client: *WaylandClient, name: u32, interface: [:0]const 
 
     try send_request(client.fd, client.wl_registry, WlRegistry.Request.bind, .{ name, full_new_id });
 
-    std.log.info("wl_registry@{}.bind: name={} interface={s} version={} id={}", .{ client.wl_registry, name, interface, version, new_id });
 
+    return new_id;
+}
+
+/// This function sends a wayland message to the connected socket to send a
+/// request to obtain the gamma_control_v1 object.
+/// This object lets us "adjust gamma tables for an output".
+/// The function has the responsability of calling .allocateId();
+/// before using it as `object_id` and then returning it to caller.
+pub fn zwlr_gamma_control_manager_v1_get_gamma_control(client: *WaylandClient) !u32 {
+    if (client.zwlr_gamma_control_manager_v1 == 0) return error.ZwlrInterfaceNotFound;
+    if (client.wl_output == 0) return error.WlOuotputInterfaceNotFound;
+
+    const new_id = client.allocateId(); 
+
+    try send_request(client.fd, client.zwlr_gamma_control_manager_v1, ZwlrGammaControlManagerV1.Request.get_gamma_control, .{new_id, client.wl_output});
+
+    std.log.info("zwlr_gamma_get_control_manager_v1@{}.get_gamma_control: get_gamma_control={}", .{ client.zwlr_gamma_control_manager_v1, new_id });
     return new_id;
 }
 
