@@ -61,7 +61,9 @@ pub const WaylandClient = struct {
     wl_output: u32 = 0,
     zwlr_gamma_control_manager_v1: u32 = 0,
     zwlr_gamma_control_v1: u32 = 0,
-    zwlr_gamma_size: u32 = 0 ,
+    zwlr_gamma_size: u32 = 0,
+    gamma_table_mmap: ?usize = null,
+
     sync_id: u32 = 0,
 
     pub fn allocateId(self: *WaylandClient) u32 {
@@ -263,7 +265,7 @@ fn event_dispatch(client: *WaylandClient, object_id: u32, opcode: u16, raw_paylo
                 std.log.info("\t↳ (deleted_id: {})\n", .{deleted_id});
             },
         }
-    } else if(object_id == client.zwlr_gamma_control_v1) {
+    } else if (object_id == client.zwlr_gamma_control_v1) {
         switch (@as(ZwlrGammaControlV1.Event, @enumFromInt(opcode))) {
             .gamma_size => {
                 client.zwlr_gamma_size = try buf_read_u32(&payload_reader);
@@ -327,7 +329,13 @@ pub fn wl_registry_bind(client: *WaylandClient, name: u32, interface: [:0]const 
 
     try send_request(client.fd, client.wl_registry, WlRegistry.Request.bind, .{ name, full_new_id });
 
-    std.log.info("wl_registry@{}.bind: name={}, interface=\"{s}\", version={}, id={}", .{ client.wl_registry, name, interface, version, new_id, });
+    std.log.info("wl_registry@{}.bind: name={}, interface=\"{s}\", version={}, id={}", .{
+        client.wl_registry,
+        name,
+        interface,
+        version,
+        new_id,
+    });
 
     return new_id;
 }
@@ -338,15 +346,59 @@ pub fn wl_registry_bind(client: *WaylandClient, name: u32, interface: [:0]const 
 /// The function has the responsability of calling .allocateId();
 /// before using it as `object_id` and then returning it to caller.
 pub fn zwlr_gamma_control_manager_v1_get_gamma_control(client: *WaylandClient) !u32 {
-    if (client.zwlr_gamma_control_manager_v1 == 0) return error.ZwlrInterfaceNotFound;
+    if (client.zwlr_gamma_control_manager_v1 == 0) return error.ZwlrGammaControlManagerV1InterfaceNotFound;
     if (client.wl_output == 0) return error.WlOuotputInterfaceNotFound;
 
-    const new_id = client.allocateId(); 
+    const new_id = client.allocateId();
 
-    try send_request(client.fd, client.zwlr_gamma_control_manager_v1, ZwlrGammaControlManagerV1.Request.get_gamma_control, .{new_id, client.wl_output});
+    try send_request(client.fd, client.zwlr_gamma_control_manager_v1, ZwlrGammaControlManagerV1.Request.get_gamma_control, .{ new_id, client.wl_output });
 
-    std.log.info("zwlr_gamma_get_control_manager_v1@{}.get_gamma_control: get_gamma_control={}", .{ client.zwlr_gamma_control_manager_v1, new_id });
+    std.log.info("zwlr_gamma_control_manager_v1@{}.get_gamma_control: get_gamma_control={}", .{ client.zwlr_gamma_control_manager_v1, new_id });
     return new_id;
+}
+
+fn mmap_gamma_table(client: *WaylandClient) !linux.fd_t {
+    if (client.zwlr_gamma_size == 0) return error.ZwlrGammaSizeNotFound;
+    const n_channels = 3; // R,G,B
+    const bytes_per_index = 2; // each index contains 2 bytes (u16).
+    const total_bytes = client.zwlr_gamma_size * bytes_per_index * n_channels;
+
+    var result = linux.memfd_create("gamma_table", 0);
+    const mmap_fd: linux.fd_t = switch (linux.errno(result)) {
+        .SUCCESS => @intCast(result),
+        else => return error.SetGammaMemFdFailed,
+    };
+    errdefer _ = linux.close(mmap_fd);
+
+    result = linux.ftruncate(mmap_fd, total_bytes);
+    if (linux.errno(result) != .SUCCESS) return error.SetGammaFtruncateFailed;
+
+    result = linux.mmap(
+        null, 
+        total_bytes, 
+        .{.READ = true, . WRITE = true}, 
+        .{.TYPE = .SHARED},
+        mmap_fd,
+        0
+    );
+    const memory: usize = switch(linux.errno(result)) {
+        .SUCCESS => result,
+        else => return error.SetGammaMmapFailed,
+    };
+    client.gamma_table_mmap = memory;
+    
+    return mmap_fd;
+}
+
+pub fn zwlr_gamma_control_v1_set_gamma(client: *WaylandClient) !void {
+    if (client.zwlr_gamma_control_v1 == 0) return error.ZwlrGammaControlV1InterfaceNotFound;
+    if (client.gamma_table_mmap == 0) return error.GammaTableMmapNotFound;
+
+    const mmap_fd = try mmap_gamma_table(client);
+
+    try send_request(client.fd, client.zwlr_gamma_control_v1, ZwlrGammaControlV1.Request.set_gamma, .{ mmap_fd });
+
+    std.log.info("zwlr_gamma_control_v1@{}.set_gamma: fd={}", .{ client.zwlr_gamma_control_v1, mmap_fd });
 }
 
 // ================= formatting helper functions =====================
