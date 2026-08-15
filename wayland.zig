@@ -62,7 +62,7 @@ pub const WaylandClient = struct {
     zwlr_gamma_control_manager_v1: u32 = 0,
     zwlr_gamma_control_v1: u32 = 0,
     zwlr_gamma_size: u32 = 0,
-    gamma_table_mmap_ptr: ?usize = null,
+    gamma_table_mmap: ?[]u16 = null,
     gamma_table_mmap_fd: linux.fd_t = 0,
 
     sync_id: u32 = 0,
@@ -360,9 +360,10 @@ pub fn zwlr_gamma_control_manager_v1_get_gamma_control(client: *WaylandClient) !
 
 pub fn mmap_gamma_table(client: *WaylandClient) !linux.fd_t {
     if (client.zwlr_gamma_size == 0) return error.ZwlrGammaSizeNotFound;
-    const n_channels = 3; // R,G,B
-    const bytes_per_index = 2; // each index contains 2 bytes (u16).
-    const total_bytes = client.zwlr_gamma_size * bytes_per_index * n_channels;
+
+    const n_channels = 3;
+    const total_elements = client.zwlr_gamma_size * n_channels;
+    const total_bytes = total_elements * @sizeOf(u16); // each elem is 2 bytes (u16)
 
     var result = linux.memfd_create("gamma_table", 0);
     const mmap_fd: linux.fd_t = switch (linux.errno(result)) {
@@ -382,18 +383,21 @@ pub fn mmap_gamma_table(client: *WaylandClient) !linux.fd_t {
         mmap_fd,
         0
     );
+
     const memory: usize = switch(linux.errno(result)) {
         .SUCCESS => result,
         else => return error.SetGammaMmapFailed,
     };
-    client.gamma_table_mmap_ptr = memory;
+
+    const ptr: [*]u16 = @ptrFromInt(memory);
+    client.gamma_table_mmap = ptr[0..total_elements];
     
     return mmap_fd;
 }
 
 pub fn zwlr_gamma_control_v1_set_gamma(client: *WaylandClient) !void {
     if (client.zwlr_gamma_control_v1 == 0) return error.ZwlrGammaControlV1InterfaceNotFound;
-    if (client.gamma_table_mmap_ptr == 0) return error.GammaTableMmapNotFound;
+    if (client.gamma_table_mmap == null) return error.GammaTableMmapNotFound;
     
     const gamma_ramp_fd = client.gamma_table_mmap_fd;
 
