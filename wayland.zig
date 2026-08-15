@@ -73,6 +73,8 @@ pub const WaylandClient = struct {
     zwlr_gamma_control_manager_v1: ?u32 = null,
 
     gamma_control : ?GammaControl = null,
+    pending_gamma_control_id: ?u32 = null,
+    pending_gamma_size: ?u32 = null,
 
     sync_id: u32 = 0,
 
@@ -182,7 +184,7 @@ fn send_request(fd: linux.fd_t, object_id: u32, opcode: anytype, args: anytype) 
 /// based on the received event.
 /// It keeps reading using syscalls (not optimal, should use shared memory)
 /// untils the sync event gets returned.
-pub fn read_event_message(client: *WaylandClient, gamma_control_id: ?u32, gamma_size: ?*u32 ) !void {
+pub fn read_event_message(client: *WaylandClient) !void {
     var buffer: [4096]u8 = undefined;
     var synced = false;
     var bytes_in_buffer: usize = 0;
@@ -215,7 +217,7 @@ pub fn read_event_message(client: *WaylandClient, gamma_control_id: ?u32, gamma_
             const payload_start = message_start + 8;
             const raw_payload = buffer[payload_start..message_end];
 
-            try event_dispatch(client, object_id, opcode, raw_payload, &synced, gamma_control_id, gamma_size);
+            try event_dispatch(client, object_id, opcode, raw_payload, &synced);
 
             cursor = message_end;
         }
@@ -232,7 +234,7 @@ pub fn read_event_message(client: *WaylandClient, gamma_control_id: ?u32, gamma_
 
 /// This function uses object_id to determine the interface
 /// and opcode to determine the event to parse and interpret
-fn event_dispatch(client: *WaylandClient, object_id: u32, opcode: u16, raw_payload: []const u8, synced: *bool,     gamma_control_id: ?u32, gamma_size: ?*u32) !void {
+fn event_dispatch(client: *WaylandClient, object_id: u32, opcode: u16, raw_payload: []const u8, synced: *bool) !void {
     var payload_reader = std.Io.Reader.fixed(raw_payload);
 
     std.log.info("", .{});
@@ -275,13 +277,11 @@ fn event_dispatch(client: *WaylandClient, object_id: u32, opcode: u16, raw_paylo
                 std.log.info("\t↳ (deleted_id: {})\n", .{deleted_id});
             },
         }
-    } else if( gamma_control_id != null and object_id == gamma_control_id.?) {
+    } else if( client.pending_gamma_control_id != null and object_id == client.pending_gamma_control_id.?) {
         switch (@as(ZwlrGammaControlV1.Event, @enumFromInt(opcode))) {
             .gamma_size => {
                 const size = try buf_read_u32(&payload_reader);
-                if (gamma_size) |size_ptr| {
-                    size_ptr.* = size;
-                }
+                client.pending_gamma_size = size;
                 std.log.info("\t↳ gamma_size: {}", .{size});
             },
             .failed => {
@@ -294,9 +294,14 @@ fn event_dispatch(client: *WaylandClient, object_id: u32, opcode: u16, raw_paylo
 }
 
 pub fn read_gamma_size( client: *WaylandClient, gamma_control_id: u32,) !u32 {
-    var gamma_size: u32 = undefined;
+    client.pending_gamma_control_id = gamma_control_id;
+    defer client.pending_gamma_control_id = null;
 
-    try read_event_message( client, gamma_control_id, &gamma_size);
+    try read_event_message( client );
+
+    const gamma_size = client.pending_gamma_size orelse
+        return error.GammaSizeNotReceived;
+    defer client.pending_gamma_size = null;
 
     return gamma_size;
 }

@@ -13,7 +13,7 @@ pub fn main(init: std.process.Init) !void {
     client.wl_registry = try wl.wl_display_get_registry(&client);
 
     client.sync_id = try wl.wl_display_sync(&client);
-    try wl.read_event_message(&client, null, null);
+    try wl.read_event_message(&client);
 
     try init_gamma(&client);
 
