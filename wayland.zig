@@ -62,7 +62,8 @@ pub const WaylandClient = struct {
     zwlr_gamma_control_manager_v1: u32 = 0,
     zwlr_gamma_control_v1: u32 = 0,
     zwlr_gamma_size: u32 = 0,
-    gamma_table_mmap: ?usize = null,
+    gamma_table_mmap_ptr: ?usize = null,
+    gamma_table_mmap_fd: linux.fd_t = 0,
 
     sync_id: u32 = 0,
 
@@ -357,7 +358,7 @@ pub fn zwlr_gamma_control_manager_v1_get_gamma_control(client: *WaylandClient) !
     return new_id;
 }
 
-fn mmap_gamma_table(client: *WaylandClient) !linux.fd_t {
+pub fn mmap_gamma_table(client: *WaylandClient) !linux.fd_t {
     if (client.zwlr_gamma_size == 0) return error.ZwlrGammaSizeNotFound;
     const n_channels = 3; // R,G,B
     const bytes_per_index = 2; // each index contains 2 bytes (u16).
@@ -385,20 +386,20 @@ fn mmap_gamma_table(client: *WaylandClient) !linux.fd_t {
         .SUCCESS => result,
         else => return error.SetGammaMmapFailed,
     };
-    client.gamma_table_mmap = memory;
+    client.gamma_table_mmap_ptr = memory;
     
     return mmap_fd;
 }
 
 pub fn zwlr_gamma_control_v1_set_gamma(client: *WaylandClient) !void {
     if (client.zwlr_gamma_control_v1 == 0) return error.ZwlrGammaControlV1InterfaceNotFound;
-    if (client.gamma_table_mmap == 0) return error.GammaTableMmapNotFound;
+    if (client.gamma_table_mmap_ptr == 0) return error.GammaTableMmapNotFound;
+    
+    const gamma_ramp_fd = client.gamma_table_mmap_fd;
 
-    const mmap_fd = try mmap_gamma_table(client);
+    try send_request(client.fd, client.zwlr_gamma_control_v1, ZwlrGammaControlV1.Request.set_gamma, .{ gamma_ramp_fd });
 
-    try send_request(client.fd, client.zwlr_gamma_control_v1, ZwlrGammaControlV1.Request.set_gamma, .{ mmap_fd });
-
-    std.log.info("zwlr_gamma_control_v1@{}.set_gamma: fd={}", .{ client.zwlr_gamma_control_v1, mmap_fd });
+    std.log.info("zwlr_gamma_control_v1@{}.set_gamma: fd={}", .{ client.zwlr_gamma_control_v1, gamma_ramp_fd });
 }
 
 // ================= formatting helper functions =====================
