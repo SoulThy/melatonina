@@ -13,7 +13,7 @@ pub fn main(init: std.process.Init) !void {
     client.wl_registry = try wl.wl_display_get_registry(&client);
 
     client.sync_id = try wl.wl_display_sync(&client);
-    try wl.read_event_message(&client);
+    try wl.read_event_message(&client, null, null);
 
     try init_gamma(&client);
 
@@ -24,14 +24,17 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn init_gamma(client: *wl.WaylandClient) !void {
-    client.zwlr_gamma_control_v1 = try wl.zwlr_gamma_control_manager_v1_get_gamma_control(client);
+    const gamma_id = try wl.zwlr_gamma_control_manager_v1_get_gamma_control(client);
 
     client.sync_id = try wl.wl_display_sync(client);
-    try wl.read_event_message(client);
+    const gamma_size = try wl.read_gamma_size(client, gamma_id);
 
-    const gamma_size = client.zwlr_gamma_size orelse
-        return error.ZwlrGammaSizeNotFound;
+    const gamma_table = try wl.mmap_gamma_table(gamma_size);
 
-    client.gamma_table = try wl.mmap_gamma_table(gamma_size);
+    client.gamma_control = .{
+        .id = gamma_id,
+        .size = gamma_size,
+        .table = gamma_table,
+    };
 }
 

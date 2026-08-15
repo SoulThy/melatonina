@@ -58,16 +58,21 @@ const GammaTable = struct {
     data: []u16,
 };
 
+const GammaControl = struct {
+    id: u32,
+    size: u32,
+    table: GammaTable,
+};
+
 pub const WaylandClient = struct {
     fd: linux.fd_t,
     next_object_id: u32 = 2,
 
     wl_registry: u32 = 0,
     wl_output: u32 = 0,
-    zwlr_gamma_control_manager_v1: u32 = 0,
-    zwlr_gamma_control_v1: u32 = 0,
-    zwlr_gamma_size: ?u32 = null,
-    gamma_table : ?GammaTable = null,
+    zwlr_gamma_control_manager_v1: ?u32 = null,
+
+    gamma_control : ?GammaControl = null,
 
     sync_id: u32 = 0,
 
@@ -177,7 +182,7 @@ fn send_request(fd: linux.fd_t, object_id: u32, opcode: anytype, args: anytype) 
 /// based on the received event.
 /// It keeps reading using syscalls (not optimal, should use shared memory)
 /// untils the sync event gets returned.
-pub fn read_event_message(client: *WaylandClient) !void {
+pub fn read_event_message(client: *WaylandClient, gamma_control_id: ?u32, gamma_size: ?*u32 ) !void {
     var buffer: [4096]u8 = undefined;
     var synced = false;
     var bytes_in_buffer: usize = 0;
@@ -210,7 +215,7 @@ pub fn read_event_message(client: *WaylandClient) !void {
             const payload_start = message_start + 8;
             const raw_payload = buffer[payload_start..message_end];
 
-            try event_dispatch(client, object_id, opcode, raw_payload, &synced);
+            try event_dispatch(client, object_id, opcode, raw_payload, &synced, gamma_control_id, gamma_size);
 
             cursor = message_end;
         }
@@ -227,7 +232,7 @@ pub fn read_event_message(client: *WaylandClient) !void {
 
 /// This function uses object_id to determine the interface
 /// and opcode to determine the event to parse and interpret
-fn event_dispatch(client: *WaylandClient, object_id: u32, opcode: u16, raw_payload: []const u8, synced: *bool) !void {
+fn event_dispatch(client: *WaylandClient, object_id: u32, opcode: u16, raw_payload: []const u8, synced: *bool,     gamma_control_id: ?u32, gamma_size: ?*u32) !void {
     var payload_reader = std.Io.Reader.fixed(raw_payload);
 
     std.log.info("", .{});
@@ -270,11 +275,14 @@ fn event_dispatch(client: *WaylandClient, object_id: u32, opcode: u16, raw_paylo
                 std.log.info("\t↳ (deleted_id: {})\n", .{deleted_id});
             },
         }
-    } else if (object_id == client.zwlr_gamma_control_v1) {
+    } else if( gamma_control_id != null and object_id == gamma_control_id.?) {
         switch (@as(ZwlrGammaControlV1.Event, @enumFromInt(opcode))) {
             .gamma_size => {
-                client.zwlr_gamma_size = try buf_read_u32(&payload_reader);
-                std.log.info("\t↳ gamma_size: {}", .{client.zwlr_gamma_size.?});
+                const size = try buf_read_u32(&payload_reader);
+                if (gamma_size) |size_ptr| {
+                    size_ptr.* = size;
+                }
+                std.log.info("\t↳ gamma_size: {}", .{size});
             },
             .failed => {
                 std.log.err("Unable to obtain gamma ramp for this output display. Make sure that conflicting softwares (redshift, wlsusnet, ...) are not running.", .{});
@@ -283,6 +291,14 @@ fn event_dispatch(client: *WaylandClient, object_id: u32, opcode: u16, raw_paylo
     } else {
         std.log.err("\t↳ (unknown event)", .{});
     }
+}
+
+pub fn read_gamma_size( client: *WaylandClient, gamma_control_id: u32,) !u32 {
+    var gamma_size: u32 = undefined;
+
+    try read_event_message( client, gamma_control_id, &gamma_size);
+
+    return gamma_size;
 }
 
 /// This function sends a wayland message to the connected socket to obtain a
@@ -351,14 +367,15 @@ pub fn wl_registry_bind(client: *WaylandClient, name: u32, interface: [:0]const 
 /// The function has the responsability of calling .allocateId();
 /// before using it as `object_id` and then returning it to caller.
 pub fn zwlr_gamma_control_manager_v1_get_gamma_control(client: *WaylandClient) !u32 {
-    if (client.zwlr_gamma_control_manager_v1 == 0) return error.ZwlrGammaControlManagerV1InterfaceNotFound;
+    const gamma_control_manager = client.zwlr_gamma_control_manager_v1 orelse
+        return error.ZwlrGammaControlManagerV1InterfaceNotFound;
     if (client.wl_output == 0) return error.WlOuotputInterfaceNotFound;
 
     const new_id = client.allocateId();
 
-    try send_request(client.fd, client.zwlr_gamma_control_manager_v1, ZwlrGammaControlManagerV1.Request.get_gamma_control, .{ new_id, client.wl_output });
+    try send_request(client.fd, gamma_control_manager , ZwlrGammaControlManagerV1.Request.get_gamma_control, .{ new_id, client.wl_output });
 
-    std.log.info("zwlr_gamma_control_manager_v1@{}.get_gamma_control: get_gamma_control={}", .{ client.zwlr_gamma_control_manager_v1, new_id });
+    std.log.info("zwlr_gamma_control_manager_v1@{}.get_gamma_control: get_gamma_control={}", .{ gamma_control_manager, new_id });
     return new_id;
 }
 
@@ -400,15 +417,16 @@ pub fn mmap_gamma_table(gamma_size: u32) !GammaTable {
 }
 
 pub fn zwlr_gamma_control_v1_set_gamma(client: *WaylandClient) !void {
-    if (client.zwlr_gamma_control_v1 == 0) return error.ZwlrGammaControlV1InterfaceNotFound;
-    const gamma_table = client.gamma_table orelse
-        return error.GammaTableMmapNotFound;
+    const gamma_control = client.gamma_control orelse
+        return error.ZwlrGammaControlManagerV1InterfaceNotFound;
+
+    const gamma_table = gamma_control.table;
 
     const gamma_ramp_fd = gamma_table.fd;
 
-    try send_request(client.fd, client.zwlr_gamma_control_v1, ZwlrGammaControlV1.Request.set_gamma, .{ gamma_ramp_fd });
+    try send_request(client.fd, gamma_control.id, ZwlrGammaControlV1.Request.set_gamma, .{ gamma_ramp_fd });
 
-    std.log.info("zwlr_gamma_control_v1@{}.set_gamma: fd={}", .{ client.zwlr_gamma_control_v1, gamma_ramp_fd });
+    std.log.info("zwlr_gamma_control_v1@{}.set_gamma: fd={}", .{ gamma_control.id, gamma_ramp_fd });
 }
 
 // ================= formatting helper functions =====================
