@@ -15,16 +15,23 @@ pub fn main(init: std.process.Init) !void {
     client.sync_id = try wl.wl_display_sync(&client);
     try wl.read_event_message(&client);
 
-    // We get the gamma controller and also the channel ramp size
-    client.zwlr_gamma_control_v1 = try wl.zwlr_gamma_control_manager_v1_get_gamma_control(&client);
+    try init_gamma(&client);
 
-    client.sync_id = try wl.wl_display_sync(&client);
-    try wl.read_event_message(&client);
-
-    client.gamma_table_mmap_fd = try wl.mmap_gamma_table(&client); 
     // now we should write the ramp! 
     // ...
     // and then call the set
     try wl.zwlr_gamma_control_v1_set_gamma(&client);
-    std.log.warn("size: {}", .{client.zwlr_gamma_size});
 }
+
+fn init_gamma(client: *wl.WaylandClient) !void {
+    client.zwlr_gamma_control_v1 = try wl.zwlr_gamma_control_manager_v1_get_gamma_control(client);
+
+    client.sync_id = try wl.wl_display_sync(client);
+    try wl.read_event_message(client);
+
+    const gamma_size = client.zwlr_gamma_size orelse
+        return error.ZwlrGammaSizeNotFound;
+
+    client.gamma_table = try wl.mmap_gamma_table(gamma_size);
+}
+
