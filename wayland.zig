@@ -76,8 +76,6 @@ pub const WaylandClient = struct {
     pending_gamma_control_id: ?u32 = null,
     pending_gamma_size: ?u32 = null,
 
-    sync_id: u32 = 0,
-
     pub fn allocateId(self: *WaylandClient) u32 {
         const id = self.next_object_id;
         self.next_object_id += 1;
@@ -184,12 +182,11 @@ fn send_request(fd: linux.fd_t, object_id: u32, opcode: anytype, args: anytype) 
 /// based on the received event.
 /// It keeps reading using syscalls (not optimal, should use shared memory)
 /// untils the sync event gets returned.
-pub fn read_event_message(client: *WaylandClient) !void {
+pub fn read_event_message(client: *WaylandClient, sync_id: u32) !void {
     var buffer: [4096]u8 = undefined;
-    var synced = false;
     var bytes_in_buffer: usize = 0;
 
-    while (!synced) {
+    while (true) {
         const result = linux.recvfrom(client.fd, buffer[bytes_in_buffer..].ptr, buffer.len - bytes_in_buffer, 0, null, null);
         if (linux.errno(result) != .SUCCESS) return error.SocketConsumeWaylandHeaderFailed;
 
@@ -217,9 +214,11 @@ pub fn read_event_message(client: *WaylandClient) !void {
             const payload_start = message_start + 8;
             const raw_payload = buffer[payload_start..message_end];
 
-            try event_dispatch(client, object_id, opcode, raw_payload, &synced);
+            const sync_completed = try event_dispatch(client, object_id, opcode, raw_payload, sync_id);
 
             cursor = message_end;
+
+            if (sync_completed) return;
         }
 
         if (cursor < bytes_in_buffer) {
@@ -234,7 +233,7 @@ pub fn read_event_message(client: *WaylandClient) !void {
 
 /// This function uses object_id to determine the interface
 /// and opcode to determine the event to parse and interpret
-fn event_dispatch(client: *WaylandClient, object_id: u32, opcode: u16, raw_payload: []const u8, synced: *bool) !void {
+fn event_dispatch(client: *WaylandClient, object_id: u32, opcode: u16, raw_payload: []const u8, sync_id: u32) !bool {
     var payload_reader = std.Io.Reader.fixed(raw_payload);
 
     std.log.info("", .{});
@@ -256,12 +255,12 @@ fn event_dispatch(client: *WaylandClient, object_id: u32, opcode: u16, raw_paylo
                 }
             },
         }
-    } else if (object_id == client.sync_id) {
+    } else if (object_id == sync_id) {
         switch (@as(WlCallback.Event, @enumFromInt(opcode))) {
             .done => {
                 const callback_data: u32 = try buf_read_u32(&payload_reader);
-                synced.* = true;
                 std.log.info("\t↳ (callback_data: {})", .{callback_data});
+                return true;
             },
         }
     } else if (object_id == WlDisplay.object_id) {
@@ -291,6 +290,7 @@ fn event_dispatch(client: *WaylandClient, object_id: u32, opcode: u16, raw_paylo
     } else {
         std.log.err("\t↳ (unknown event)", .{});
     }
+    return false;
 }
 
 /// This function asks event_dispatch() to watch for a gamma_size event
@@ -349,8 +349,8 @@ fn wl_display_sync(client: *WaylandClient) !u32 {
 // and reads the events afterwards until the sync
 // event response.
 pub fn wait_for_sync(client: *WaylandClient) !void {
-    client.sync_id = try wl_display_sync(client);
-    try read_event_message(client);
+    const sync_id = try wl_display_sync(client);
+    try read_event_message(client, sync_id);
 }
 
 /// This function sends a wayland message to the connected socket to send a
