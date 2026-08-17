@@ -293,6 +293,13 @@ fn event_dispatch(client: *WaylandClient, object_id: u32, opcode: u16, raw_paylo
     }
 }
 
+/// This function asks event_dispatch() to watch for a gamma_size event
+/// coming from gamma_control_id, then waits for it using wait_for_sync().
+/// This is done by setting client.pending_gamma_control_id before waiting,
+/// which event_dispatch() checks to know which object_id's event to store
+/// into client.pending_gamma_size.
+/// The function has the responsability of clearing both pending fields
+/// before returning, so the client is left in a clean state.
 pub fn read_gamma_size( client: *WaylandClient, gamma_control_id: u32,) !u32 {
     client.pending_gamma_control_id = gamma_control_id;
     defer client.pending_gamma_control_id = null;
@@ -394,10 +401,17 @@ pub fn zwlr_gamma_control_manager_v1_get_gamma_control(client: *WaylandClient) !
     return new_id;
 }
 
+/// This function creates the shared memory buffer that will hold the
+/// gamma ramp table (one u16 per channel per gamma_size step, 3 channels:
+/// red, green, blue).
+/// This is done with memfd_create + mmap, so the resulting file descriptor
+/// can be sent directly to the compositor over the wayland socket.
+/// The function has the responsability of sizing the buffer correctly
+/// and returning it wrapped in a GammaTable.
 pub fn mmap_gamma_table(gamma_size: u32) !GammaTable {
     const n_channels = 3;
     const total_elements = gamma_size * n_channels;
-    const total_bytes = total_elements * @sizeOf(u16); // each elem is 2 bytes (u16)
+    const total_bytes = total_elements * @sizeOf(u16);
 
     var result = linux.memfd_create("gamma_table", 0);
     const mmap_fd: linux.fd_t = switch (linux.errno(result)) {
@@ -431,6 +445,12 @@ pub fn mmap_gamma_table(gamma_size: u32) !GammaTable {
     };
 }
 
+/// This function sends a wayland message to apply the gamma ramp table.
+/// This is done by making a `set_gamma` request to the
+/// `zwlr_gamma_control_v1` interface, passing the file descriptor of the
+/// shared memory buffer that already holds the ramp values.
+/// The compositor reads the table straight from that fd, so the table
+/// must already be filled in before calling this.
 pub fn zwlr_gamma_control_v1_set_gamma(client: *WaylandClient) !void {
     const gamma_control = client.gamma_control orelse
         return error.ZwlrGammaControlManagerV1InterfaceNotFound;
