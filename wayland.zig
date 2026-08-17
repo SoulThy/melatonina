@@ -296,8 +296,8 @@ fn event_dispatch(client: *WaylandClient, object_id: u32, opcode: u16, raw_paylo
 pub fn read_gamma_size( client: *WaylandClient, gamma_control_id: u32,) !u32 {
     client.pending_gamma_control_id = gamma_control_id;
     defer client.pending_gamma_control_id = null;
-
-    try read_event_message( client );
+    
+    try wait_for_sync(client);
 
     const gamma_size = client.pending_gamma_size orelse
         return error.GammaSizeNotReceived;
@@ -327,13 +327,23 @@ pub fn wl_display_get_registry(client: *WaylandClient) !u32 {
 /// has been sent.
 /// The function has the responsability of calling .allocateId();
 /// before using it as `object_id` and then returning it to caller.
-pub fn wl_display_sync(client: *WaylandClient) !u32 {
+/// Private: use wait_for_sync() instead, which pairs this with the
+/// matching read_event_message() call so the two can't be separated.
+fn wl_display_sync(client: *WaylandClient) !u32 {
     const new_id = client.allocateId();
 
     try send_request(client.fd, WlDisplay.object_id, WlDisplay.Request.sync, .{new_id});
 
     std.log.info("wl_display@{}.sync: sync={}", .{ WlDisplay.object_id, new_id });
     return new_id;
+}
+
+// This function calls the wayland send sync function
+// and reads the events afterwards until the sync
+// event response.
+pub fn wait_for_sync(client: *WaylandClient) !void {
+    client.sync_id = try wl_display_sync(client);
+    try read_event_message(client);
 }
 
 /// This function sends a wayland message to the connected socket to send a
