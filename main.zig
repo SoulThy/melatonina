@@ -19,6 +19,7 @@ pub fn main(init: std.process.Init) !void {
     // ...
     // and then call the set
     try wl.zwlr_gamma_control_v1_set_gamma(&client);
+    _ = try init.io.sleep(.fromSeconds(1), .awake);
 }
 
 fn init_gamma(client: *wl.WaylandClient) !void {

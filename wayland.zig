@@ -116,17 +116,65 @@ pub fn display_connect(env: *std.process.Environ.Map) !linux.fd_t {
     return fd;
 }
 
+/// This function sends a wayland request whose only argument is a file
+/// descriptor (like `zwlr_gamma_control_v1.set_gamma`).
+/// This is different from send_request() above: in the wire protocol, an
+/// `fd` argument adds ZERO bytes to the message payload. The fd is never
+/// written into the message body at all, it travels separately, as
+/// ancillary data (SCM_RIGHTS) attached to the underlying Unix socket
+/// message. This is why we need sendmsg() here instead of sendto().
+fn send_request_with_fd(fd: linux.fd_t, object_id: u32, opcode: anytype, passed_fd: linux.fd_t) !void {
+    const raw_opcode: u16 = @intFromEnum(opcode);
+
+    const header = WaylandMessageHeader{
+        .object_id = object_id,
+        .size_and_opcode = @as(u32, @sizeOf(WaylandMessageHeader)) << 16 | raw_opcode,
+    };
+
+    const iov = [_]std.posix.iovec_const{
+        .{
+            .base = std.mem.asBytes(&header),
+            .len = @sizeOf(WaylandMessageHeader),
+        },
+    };
+
+    const ancillary_len = @sizeOf(linux.cmsghdr) + @sizeOf(linux.fd_t);
+    const ancillary: extern struct {
+        header: linux.cmsghdr,
+        fd: linux.fd_t,
+    } = .{
+        .header = .{
+            .len = ancillary_len,
+            .level = linux.SOL.SOCKET,
+            .type = linux.SCM.RIGHTS,
+        },
+        .fd = passed_fd,
+    };
+
+    const msghdr = linux.msghdr_const {
+        .name = null,
+        .namelen = 0,
+        .iov = &iov,
+        .iovlen = 1,
+        .control = &ancillary,
+        .controllen = ancillary_len,
+        .flags = 0,
+    };
+
+    const result = linux.sendmsg(fd, &msghdr, linux.MSG.DONTWAIT);
+    if (linux.errno(result) != .SUCCESS) {
+        std.log.err("errno: {}", .{linux.errno(result)});
+        return error.WaylandSendRequestWithFdFailed;
+    }
+}
+
 /// This functions sends a request to the socket pointed by
 /// the file descriptor following the wire protocol format.
 ///
 /// ref: https://wayland.freedesktop.org/docs/book/Protocol.html#wire-format
 /// ref: https://wayland-book.com/registry.html
 fn send_request(fd: linux.fd_t, object_id: u32, opcode: anytype, args: anytype) !void {
-    const raw_opcode: u16 = switch (@typeInfo(@TypeOf(opcode))) {
-        .@"enum" => @intFromEnum(opcode),
-        .comptime_int, .int => @intCast(opcode),
-        else => @compileError("invalid opcode, it has to be of type enum or int"),
-    };
+    const raw_opcode: u16 = @intFromEnum(opcode);
 
     const struct_info = @typeInfo(@TypeOf(args)).@"struct";
     const field_names = struct_info.field_names;
@@ -459,7 +507,7 @@ pub fn zwlr_gamma_control_v1_set_gamma(client: *WaylandClient) !void {
 
     const gamma_ramp_fd = gamma_table.fd;
 
-    try send_request(client.fd, gamma_control.id, ZwlrGammaControlV1.Request.set_gamma, .{ gamma_ramp_fd });
+    try send_request_with_fd(client.fd, gamma_control.id, ZwlrGammaControlV1.Request.set_gamma ,gamma_ramp_fd);
 
     std.log.info("zwlr_gamma_control_v1@{}.set_gamma: fd={}", .{ gamma_control.id, gamma_ramp_fd });
 }
