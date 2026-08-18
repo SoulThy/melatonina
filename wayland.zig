@@ -55,7 +55,7 @@ const WaylandMessageHeader = extern struct {
 
 const GammaTable = struct {
     fd: linux.fd_t,
-    data: []u16,
+    data: [3][]u16,
 };
 
 const GammaControl = struct {
@@ -489,7 +489,11 @@ pub fn mmap_gamma_table(gamma_size: u32) !GammaTable {
     
     return .{
         .fd = mmap_fd,
-        .data = ptr[0..total_elements],
+        .data = .{
+            ptr[0 * gamma_size .. 1 * gamma_size],
+            ptr[1 * gamma_size .. 2 * gamma_size],
+            ptr[2 * gamma_size .. 3 * gamma_size],
+        },
     };
 }
 

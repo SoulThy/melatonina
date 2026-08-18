@@ -32,5 +32,13 @@ fn init_gamma(client: *wl.WaylandClient) !void {
         .size = gamma_size,
         .table = gamma_table,
     };
+    
+    // We init the gamma ramp to the identity ramp
+    const maxU16 = std.math.maxInt(u16);
+    for(0..gamma_size) |i| {
+        const v: u16 = @intCast((i*maxU16)/(gamma_size-1));
+        gamma_table.data[0][i] = v;
+        gamma_table.data[1][i] = v;
+        gamma_table.data[2][i] = v;
+    }
 }
-
