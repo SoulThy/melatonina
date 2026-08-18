@@ -56,6 +56,20 @@ const WaylandMessageHeader = extern struct {
 const GammaTable = struct {
     fd: linux.fd_t,
     data: [3][]u16,
+
+    pub fn set_warmth(self: GammaTable, strength: f32) void {
+        const s: f32 = 1-@min(@max(strength, 0.0), 1.0);
+
+        for (0..self.data[0].len) |i| {
+            //const r = @as(f32, @floatFromInt(self.data[0][i]));
+            //const g = @as(f32, @floatFromInt(self.data[1][i]));
+            const b = @as(f32, @floatFromInt(self.data[2][i]));
+
+            //self.data[0][i] = @intFromFloat(r);
+            //self.data[1][i] = @intFromFloat(g);
+            self.data[2][i] = @intFromFloat(b*s);
+        }
+    }
 };
 
 const GammaControl = struct {

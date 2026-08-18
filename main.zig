@@ -14,12 +14,9 @@ pub fn main(init: std.process.Init) !void {
     try wl.wait_for_sync(&client);
     
     try init_gamma(&client);
-
-    // now we should write the ramp! 
-    // ...
-    // and then call the set
+    client.gamma_control.?.table.set_warmth(0.8);
     try wl.zwlr_gamma_control_v1_set_gamma(&client);
-    _ = try init.io.sleep(.fromSeconds(1), .awake);
+    _ = try init.io.sleep(.fromSeconds(3), .awake);
 }
 
 fn init_gamma(client: *wl.WaylandClient) !void {
