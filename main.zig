@@ -12,9 +12,9 @@ pub fn main(init: std.process.Init) !void {
 
     client.wl_registry = try wl.wl_display_get_registry(&client);
     try wl.wait_for_sync(&client);
-    
+
     try init_gamma(&client);
-    client.gamma_control.?.table.set_warmth(0.8);
+    client.gamma_control.?.table.set_kelvin(3000);
     try wl.zwlr_gamma_control_v1_set_gamma(&client);
     _ = try init.io.sleep(.fromSeconds(3), .awake);
 }
@@ -29,11 +29,11 @@ fn init_gamma(client: *wl.WaylandClient) !void {
         .size = gamma_size,
         .table = gamma_table,
     };
-    
+
     // We init the gamma ramp to the identity ramp
     const maxU16 = std.math.maxInt(u16);
-    for(0..gamma_size) |i| {
-        const v: u16 = @intCast((i*maxU16)/(gamma_size-1));
+    for (0..gamma_size) |i| {
+        const v: u16 = @intCast((i * maxU16) / (gamma_size - 1));
         gamma_table.data[0][i] = v;
         gamma_table.data[1][i] = v;
         gamma_table.data[2][i] = v;

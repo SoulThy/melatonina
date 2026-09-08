@@ -57,18 +57,73 @@ const GammaTable = struct {
     fd: linux.fd_t,
     data: [3][]u16,
 
-    pub fn set_warmth(self: GammaTable, strength: f32) void {
-        const s: f32 = 1-@min(@max(strength, 0.0), 1.0);
+    /// Applies a color-temperature correction to the ramp in place.
+    /// Must be called once against a freshly-initialized identity ramp:
+    /// calling it repeatedly compounds the effect instead of recomputing
+    /// it from scratch, for now this is okay since i don't intend to
+    /// change kelvin temp on runtime.
+    pub fn set_kelvin(self: GammaTable, kelvin: u16) void {
+        const red_255, const green_255, const blue_255 = tanner_helland(kelvin);
+        const weight_r = red_255 / 255.0;
+        const weight_g = green_255 / 255.0;
+        const weight_b = blue_255 / 255.0;
 
         for (0..self.data[0].len) |i| {
-            //const r = @as(f32, @floatFromInt(self.data[0][i]));
-            //const g = @as(f32, @floatFromInt(self.data[1][i]));
+            const r = @as(f32, @floatFromInt(self.data[0][i]));
+            const g = @as(f32, @floatFromInt(self.data[1][i]));
             const b = @as(f32, @floatFromInt(self.data[2][i]));
 
-            //self.data[0][i] = @intFromFloat(r);
-            //self.data[1][i] = @intFromFloat(g);
-            self.data[2][i] = @intFromFloat(b*s);
+            self.data[0][i] = @intFromFloat(@round(r * weight_r));
+            self.data[1][i] = @intFromFloat(@round(g * weight_g));
+            self.data[2][i] = @intFromFloat(@round(b * weight_b));
         }
+    }
+
+    /// Approximates the RGB weights (0-255 each) of a blackbody radiator at the
+    /// given temperature in Kelvin. Valid roughly in the 1000-40000K range.
+    /// These weights are meant to be applied directly to already gamma-encoded
+    /// (display-space) RGB values, so no linearization step is needed.
+    /// ref: https://tannerhelland.com/2012/09/18/convert-temperature-rgb-algorithm-code.html
+    fn tanner_helland(temperature: u16) struct { f32, f32, f32 } {
+        const temp: f32 = @as(f32, @floatFromInt(temperature)) / 100.0;
+
+        var red: f32 = 0.0;
+        var green: f32 = 0.0;
+        var blue: f32 = 0.0;
+        const min = 0;
+        const max = 255;
+
+        // calculate red:
+        if (temp <= 66) {
+            red = 255;
+        } else {
+            red = temp - 60;
+            red = 329.698727446 * std.math.pow(f32, red, -0.1332047592);
+        }
+        red = std.math.clamp(red, min, max);
+
+        // calculate green:
+        if (temp <= 66) {
+            green = temp;
+            green = 99.4708025861 * @log(green) - 161.1195681661;
+        } else {
+            green = temp - 60;
+            green = 288.1221695283 * std.math.pow(f32, green, -0.0755148492);
+        }
+        green = std.math.clamp(green, min, max);
+
+        // calculate blue:
+        if (temp >= 66) {
+            blue = 255;
+        } else if (temp <= 19) {
+            blue = 0;
+        } else {
+            blue = temp - 10;
+            blue = 138.5177312231 * @log(blue) - 305.0447927307;
+        }
+        blue = std.math.clamp(blue, min, max);
+
+        return .{ red, green, blue };
     }
 };
 
@@ -86,7 +141,7 @@ pub const WaylandClient = struct {
     wl_output: u32 = 0,
     zwlr_gamma_control_manager_v1: ?u32 = null,
 
-    gamma_control : ?GammaControl = null,
+    gamma_control: ?GammaControl = null,
     pending_gamma_control_id: ?u32 = null,
     pending_gamma_size: ?u32 = null,
 
@@ -165,7 +220,7 @@ fn send_request_with_fd(fd: linux.fd_t, object_id: u32, opcode: anytype, passed_
         .fd = passed_fd,
     };
 
-    const msghdr = linux.msghdr_const {
+    const msghdr = linux.msghdr_const{
         .name = null,
         .namelen = 0,
         .iov = &iov,
@@ -338,7 +393,7 @@ fn event_dispatch(client: *WaylandClient, object_id: u32, opcode: u16, raw_paylo
                 std.log.info("\t↳ (deleted_id: {})\n", .{deleted_id});
             },
         }
-    } else if( client.pending_gamma_control_id != null and object_id == client.pending_gamma_control_id.?) {
+    } else if (client.pending_gamma_control_id != null and object_id == client.pending_gamma_control_id.?) {
         switch (@as(ZwlrGammaControlV1.Event, @enumFromInt(opcode))) {
             .gamma_size => {
                 const size = try buf_read_u32(&payload_reader);
@@ -362,10 +417,13 @@ fn event_dispatch(client: *WaylandClient, object_id: u32, opcode: u16, raw_paylo
 /// into client.pending_gamma_size.
 /// The function has the responsability of clearing both pending fields
 /// before returning, so the client is left in a clean state.
-pub fn read_gamma_size( client: *WaylandClient, gamma_control_id: u32,) !u32 {
+pub fn read_gamma_size(
+    client: *WaylandClient,
+    gamma_control_id: u32,
+) !u32 {
     client.pending_gamma_control_id = gamma_control_id;
     defer client.pending_gamma_control_id = null;
-    
+
     try wait_for_sync(client);
 
     const gamma_size = client.pending_gamma_size orelse
@@ -457,7 +515,7 @@ pub fn zwlr_gamma_control_manager_v1_get_gamma_control(client: *WaylandClient) !
 
     const new_id = client.allocateId();
 
-    try send_request(client.fd, gamma_control_manager , ZwlrGammaControlManagerV1.Request.get_gamma_control, .{ new_id, client.wl_output });
+    try send_request(client.fd, gamma_control_manager, ZwlrGammaControlManagerV1.Request.get_gamma_control, .{ new_id, client.wl_output });
 
     std.log.info("zwlr_gamma_control_manager_v1@{}.get_gamma_control: get_gamma_control={}", .{ gamma_control_manager, new_id });
     return new_id;
@@ -485,22 +543,15 @@ pub fn mmap_gamma_table(gamma_size: u32) !GammaTable {
     result = linux.ftruncate(mmap_fd, total_bytes);
     if (linux.errno(result) != .SUCCESS) return error.SetGammaFtruncateFailed;
 
-    result = linux.mmap(
-        null, 
-        total_bytes, 
-        .{.READ = true, . WRITE = true}, 
-        .{.TYPE = .SHARED},
-        mmap_fd,
-        0
-    );
+    result = linux.mmap(null, total_bytes, .{ .READ = true, .WRITE = true }, .{ .TYPE = .SHARED }, mmap_fd, 0);
 
-    const memory: usize = switch(linux.errno(result)) {
+    const memory: usize = switch (linux.errno(result)) {
         .SUCCESS => result,
         else => return error.SetGammaMmapFailed,
     };
 
     const ptr: [*]u16 = @ptrFromInt(memory);
-    
+
     return .{
         .fd = mmap_fd,
         .data = .{
@@ -525,7 +576,7 @@ pub fn zwlr_gamma_control_v1_set_gamma(client: *WaylandClient) !void {
 
     const gamma_ramp_fd = gamma_table.fd;
 
-    try send_request_with_fd(client.fd, gamma_control.id, ZwlrGammaControlV1.Request.set_gamma ,gamma_ramp_fd);
+    try send_request_with_fd(client.fd, gamma_control.id, ZwlrGammaControlV1.Request.set_gamma, gamma_ramp_fd);
 
     std.log.info("zwlr_gamma_control_v1@{}.set_gamma: fd={}", .{ gamma_control.id, gamma_ramp_fd });
 }
