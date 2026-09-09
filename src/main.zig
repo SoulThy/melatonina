@@ -34,7 +34,8 @@ pub fn main(init: std.process.Init) !void {
     try init_gamma(&client);
     client.gamma_control.?.table.set_kelvin(kelvin);
     try wl.zwlr_gamma_control_v1_set_gamma(&client);
-    _ = try init.io.sleep(.fromSeconds(3), .awake);
+
+    try wl.run_forever(&client);
 }
 
 fn args_get_kelvin(args: std.process.Args) u16 {

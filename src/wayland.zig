@@ -348,6 +348,13 @@ pub fn read_event_message(client: *WaylandClient, sync_id: u32) !void {
     }
 }
 
+/// This function blocks, and keeps processing wayland
+/// incoming events. This loops returns only if a
+/// socket/network error is presented.
+pub fn run_forever(client: *WaylandClient) !void {
+    try read_event_message(client, 0);
+}
+
 /// This function uses object_id to determine the interface
 /// and opcode to determine the event to parse and interpret
 fn event_dispatch(client: *WaylandClient, object_id: u32, opcode: u16, raw_payload: []const u8, sync_id: u32) !bool {
