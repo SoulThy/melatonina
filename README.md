@@ -1,5 +1,5 @@
 <h1 align="center">
-  <img src="logo/gecko_logo_colored.svg" width="70" align="absmiddle" alt="melatonina logo"> melatonina
+  <img src="logo/gecko_logo_colored.svg" width="140" align="absmiddle" alt="melatonina logo"> melatonina
 </h1>
 
 <p align="center">
