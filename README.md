@@ -47,8 +47,8 @@ Options:
 Example: ./melatonina -k 4500
 ```
 
-1000K - `#ff3300`<br>
-2500K - `#ff6600`<br>
-3500K - `#ff9933`<br>
-4500K - `#ffcc66`<br>
-5500K - `#ffffff`
+1000K - <img src="https://placehold.co/15x15/ff3300/ff3300.png" width="15" align="absmiddle"> `#ff3300`<br>
+2500K - <img src="https://placehold.co/15x15/ff6600/ff6600.png" width="15" align="absmiddle"> `#ff6600`<br>
+3500K - <img src="https://placehold.co/15x15/ff9933/ff9933.png" width="15" align="absmiddle"> `#ff9933`<br>
+4500K - <img src="https://placehold.co/15x15/ffcc66/ffcc66.png" width="15" align="absmiddle"> `#ffcc66`<br>
+5500K - <img src="https://placehold.co/15x15/ffffff/ffffff.png" width="15" align="absmiddle"> `#ffffff`
