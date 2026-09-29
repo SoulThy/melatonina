@@ -193,7 +193,7 @@ pub fn display_connect(env: *std.process.Environ.Map) !linux.fd_t {
 /// ancillary data (SCM_RIGHTS) attached to the underlying Unix socket
 /// message. This is why we need sendmsg() here instead of sendto().
 fn send_request_with_fd(fd: linux.fd_t, object_id: u32, opcode: anytype, passed_fd: linux.fd_t) !void {
-    const raw_opcode: u16 = @intFromEnum(opcode);
+    const raw_opcode: u16 = @backingInt(opcode);
 
     const header = WaylandMessageHeader{
         .object_id = object_id,
@@ -243,7 +243,7 @@ fn send_request_with_fd(fd: linux.fd_t, object_id: u32, opcode: anytype, passed_
 /// ref: https://wayland.freedesktop.org/docs/book/Protocol.html#wire-format
 /// ref: https://wayland-book.com/registry.html
 fn send_request(fd: linux.fd_t, object_id: u32, opcode: anytype, args: anytype) !void {
-    const raw_opcode: u16 = @intFromEnum(opcode);
+    const raw_opcode: u16 = @backingInt(opcode);
 
     const struct_info = @typeInfo(@TypeOf(args)).@"struct";
     const field_names = struct_info.field_names;
@@ -364,7 +364,7 @@ fn event_dispatch(client: *WaylandClient, object_id: u32, opcode: u16, raw_paylo
     std.log.info("object_id {d:>10}\t size {d:>6}\t opcode {d:>6}", .{ object_id, raw_payload.len + 8, opcode });
 
     if (object_id == client.wl_registry) {
-        switch (@as(WlRegistry.Event, @enumFromInt(opcode))) {
+        switch (@as(WlRegistry.Event, @fromBackingInt(@intCast(opcode)))) {
             .global => {
                 const name: u32 = try buf_read_u32(&payload_reader);
                 const interface: [:0]const u8 = try buf_read_string(&payload_reader);
@@ -380,7 +380,7 @@ fn event_dispatch(client: *WaylandClient, object_id: u32, opcode: u16, raw_paylo
             },
         }
     } else if (object_id == sync_id) {
-        switch (@as(WlCallback.Event, @enumFromInt(opcode))) {
+        switch (@as(WlCallback.Event, @fromBackingInt(@intCast(opcode)))) {
             .done => {
                 const callback_data: u32 = try buf_read_u32(&payload_reader);
                 std.log.info("\t↳ (callback_data: {})", .{callback_data});
@@ -388,7 +388,7 @@ fn event_dispatch(client: *WaylandClient, object_id: u32, opcode: u16, raw_paylo
             },
         }
     } else if (object_id == WlDisplay.object_id) {
-        switch (@as(WlDisplay.Event, @enumFromInt(opcode))) {
+        switch (@as(WlDisplay.Event, @fromBackingInt(@intCast(opcode)))) {
             .@"error" => {
                 const bad_object_id: u32 = try buf_read_u32(&payload_reader);
                 const code: u32 = try buf_read_u32(&payload_reader);
@@ -401,7 +401,7 @@ fn event_dispatch(client: *WaylandClient, object_id: u32, opcode: u16, raw_paylo
             },
         }
     } else if (client.pending_gamma_control_id != null and object_id == client.pending_gamma_control_id.?) {
-        switch (@as(ZwlrGammaControlV1.Event, @enumFromInt(opcode))) {
+        switch (@as(ZwlrGammaControlV1.Event, @fromBackingInt(@intCast(opcode)))) {
             .gamma_size => {
                 const size = try buf_read_u32(&payload_reader);
                 client.pending_gamma_size = size;

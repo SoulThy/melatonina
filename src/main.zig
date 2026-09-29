@@ -41,14 +41,13 @@ pub fn main(init: std.process.Init) !void {
 fn args_get_kelvin(args: std.process.Args) u16 {
     var it = args.iterate();
     _ = it.next();
-    
+
     const option = it.next() orelse fatal(usage, .{});
     if (!std.mem.eql(u8, option, "-k"))
         fatal(usage, .{});
 
     const value = it.next() orelse fatal(usage, .{});
-    const kelvin = std.fmt.parseInt(u16, value, 10) 
-        catch fatal("Error when parsing temperature: '{s}'", .{value});
+    const kelvin = std.fmt.parseInt(u16, value, 10) catch fatal("Error when parsing temperature: '{s}'", .{value});
     return kelvin;
 }
 
