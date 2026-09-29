@@ -1,0 +1,24 @@
+name: CI
+
+on: 
+  push:
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: master
+
+      - name: Check code formatting
+        run: zig fmt --check .
+
+      - name: Build project
+        run: zig build -Doptimize=fast
+
