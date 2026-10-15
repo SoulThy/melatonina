@@ -407,6 +407,7 @@ fn event_dispatch(client: *WaylandClient, object_id: u32, opcode: u16, raw_paylo
                 const code: u32 = try buf_read_u32(&payload_reader);
                 const message: [:0]const u8 = try buf_read_string(&payload_reader);
                 log.err("\t↳ wl_display.error: object_id={} code={} message={s}", .{ bad_object_id, code, message });
+                return error.WaylandProtocolError;
             },
             .delete_id => {
                 const deleted_id: u32 = try buf_read_u32(&payload_reader);
