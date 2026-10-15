@@ -1,5 +1,6 @@
 const std = @import("std");
 const linux = std.os.linux;
+const log = std.log.scoped(.wayland);
 
 const WlDisplay = struct {
     const object_id: u32 = 1;
@@ -181,7 +182,7 @@ pub fn display_connect(env: *std.process.Environ.Map) !linux.fd_t {
     result = linux.connect(fd, &addr, @intCast(addr_len));
     if (linux.errno(result) != .SUCCESS) return error.SocketConnectionFailed;
 
-    std.log.info("fd to socket: {}", .{fd});
+    log.debug("fd to socket: {}", .{fd});
     return fd;
 }
 
@@ -232,7 +233,7 @@ fn send_request_with_fd(fd: linux.fd_t, object_id: u32, opcode: anytype, passed_
 
     const result = linux.sendmsg(fd, &msghdr, linux.MSG.DONTWAIT);
     if (linux.errno(result) != .SUCCESS) {
-        std.log.err("errno: {}", .{linux.errno(result)});
+        log.err("errno: {}", .{linux.errno(result)});
         return error.WaylandSendRequestWithFdFailed;
     }
 }
@@ -286,7 +287,7 @@ fn send_request(fd: linux.fd_t, object_id: u32, opcode: anytype, args: anytype) 
 
     const result = linux.sendto(fd, &buffer, total_size, linux.MSG.DONTWAIT, null, 0);
     if (linux.errno(result) != .SUCCESS) {
-        std.log.err("errno: {}", .{linux.errno(result)});
+        log.err("errno: {}", .{linux.errno(result)});
         return error.WaylandSendToFailed;
     }
 }
@@ -358,18 +359,28 @@ pub fn run_forever(client: *WaylandClient) !void {
 /// This function uses object_id to determine the interface
 /// and opcode to determine the event to parse and interpret
 fn event_dispatch(client: *WaylandClient, object_id: u32, opcode: u16, raw_payload: []const u8, sync_id: u32) !bool {
+    const helper = struct {
+        fn event_from_opcode(Event: type, interface: []const u8, event_opcode: u16) ?Event {
+            return std.enums.fromInt(Event, event_opcode) orelse {
+                log.warn("{s}: unknown opcode {d}", .{ interface, event_opcode });
+                return null;
+            };
+        }
+    };
+
     var payload_reader = std.Io.Reader.fixed(raw_payload);
 
-    std.log.info("", .{});
-    std.log.info("object_id {d:>10}\t size {d:>6}\t opcode {d:>6}", .{ object_id, raw_payload.len + 8, opcode });
+    log.debug("", .{});
+    log.debug("object_id {d:>10}\t size {d:>6}\t opcode {d:>6}", .{ object_id, raw_payload.len + 8, opcode });
 
     if (object_id == client.wl_registry) {
-        switch (@as(WlRegistry.Event, @fromBackingInt(@intCast(opcode)))) {
+        const event = helper.event_from_opcode(WlRegistry.Event, "wl_registry", opcode) orelse return false;
+        switch (event) {
             .global => {
                 const name: u32 = try buf_read_u32(&payload_reader);
                 const interface: [:0]const u8 = try buf_read_string(&payload_reader);
                 const version: u32 = try buf_read_u32(&payload_reader);
-                std.log.info("\t↳ (name: {},interface: {s},version: {})", .{ name, interface, version });
+                log.debug("\t↳ (name: {},interface: {s},version: {})", .{ name, interface, version });
                 // todo: this is starting to look like 'if' nesting hell, could
                 // probably use a string hashmap instead. But for now will do.
                 if (std.mem.eql(u8, interface, "wl_output")) {
@@ -380,39 +391,46 @@ fn event_dispatch(client: *WaylandClient, object_id: u32, opcode: u16, raw_paylo
             },
         }
     } else if (object_id == sync_id) {
-        switch (@as(WlCallback.Event, @fromBackingInt(@intCast(opcode)))) {
+        const event = helper.event_from_opcode(WlCallback.Event, "wl_callback", opcode) orelse return false;
+        switch (event) {
             .done => {
                 const callback_data: u32 = try buf_read_u32(&payload_reader);
-                std.log.info("\t↳ (callback_data: {})", .{callback_data});
+                log.debug("\t↳ (callback_data: {})", .{callback_data});
                 return true;
             },
         }
     } else if (object_id == WlDisplay.object_id) {
-        switch (@as(WlDisplay.Event, @fromBackingInt(@intCast(opcode)))) {
+        const event = helper.event_from_opcode(WlDisplay.Event, "wl_display", opcode) orelse return false;
+        switch (event) {
             .@"error" => {
                 const bad_object_id: u32 = try buf_read_u32(&payload_reader);
                 const code: u32 = try buf_read_u32(&payload_reader);
                 const message: [:0]const u8 = try buf_read_string(&payload_reader);
-                std.log.err("\t↳ wl_display.error: object_id={} code={} message={s}", .{ bad_object_id, code, message });
+                log.err("\t↳ wl_display.error: object_id={} code={} message={s}", .{ bad_object_id, code, message });
             },
             .delete_id => {
                 const deleted_id: u32 = try buf_read_u32(&payload_reader);
-                std.log.info("\t↳ (deleted_id: {})\n", .{deleted_id});
+                log.debug("\t↳ (deleted_id: {})\n", .{deleted_id});
             },
         }
     } else if (client.pending_gamma_control_id != null and object_id == client.pending_gamma_control_id.?) {
-        switch (@as(ZwlrGammaControlV1.Event, @fromBackingInt(@intCast(opcode)))) {
+        const event = helper.event_from_opcode(ZwlrGammaControlV1.Event, "zwlr_gamma_control_v1", opcode) orelse return false;
+        switch (event) {
             .gamma_size => {
                 const size = try buf_read_u32(&payload_reader);
                 client.pending_gamma_size = size;
-                std.log.info("\t↳ gamma_size: {}", .{size});
+                log.debug("\t↳ gamma_size: {}", .{size});
             },
             .failed => {
-                std.log.err("Unable to obtain gamma ramp for this output display. Make sure that conflicting softwares (redshift, wlsusnet, ...) are not running.", .{});
+                log.err("Unable to obtain gamma ramp for this output display. Make sure that conflicting softwares (redshift, wlsusnet, ...) are not running.", .{});
             },
         }
+    } else if (object_id == client.wl_output) {
+        log.debug("\t↳ wl_output event {d} (ignored)", .{opcode});
     } else {
-        std.log.err("\t↳ (unknown event)", .{});
+        log.warn("unhandled event: object_id={d} opcode={d} size={d}", .{
+            object_id, opcode, raw_payload.len + 8,
+        });
     }
     return false;
 }
@@ -450,7 +468,7 @@ pub fn wl_display_get_registry(client: *WaylandClient) !u32 {
 
     try send_request(client.fd, WlDisplay.object_id, WlDisplay.Request.get_registry, .{new_id});
 
-    std.log.info("wl_display@{}.get_registry: wl_registry={}", .{ WlDisplay.object_id, new_id });
+    log.debug("wl_display@{}.get_registry: wl_registry={}", .{ WlDisplay.object_id, new_id });
     return new_id;
 }
 
@@ -468,7 +486,7 @@ fn wl_display_sync(client: *WaylandClient) !u32 {
 
     try send_request(client.fd, WlDisplay.object_id, WlDisplay.Request.sync, .{new_id});
 
-    std.log.info("wl_display@{}.sync: sync={}", .{ WlDisplay.object_id, new_id });
+    log.debug("wl_display@{}.sync: sync={}", .{ WlDisplay.object_id, new_id });
     return new_id;
 }
 
@@ -499,7 +517,7 @@ pub fn wl_registry_bind(client: *WaylandClient, name: u32, interface: [:0]const 
 
     try send_request(client.fd, client.wl_registry, WlRegistry.Request.bind, .{ name, full_new_id });
 
-    std.log.info("wl_registry@{}.bind: name={}, interface=\"{s}\", version={}, id={}", .{
+    log.debug("wl_registry@{}.bind: name={}, interface=\"{s}\", version={}, id={}", .{
         client.wl_registry,
         name,
         interface,
@@ -524,7 +542,7 @@ pub fn zwlr_gamma_control_manager_v1_get_gamma_control(client: *WaylandClient) !
 
     try send_request(client.fd, gamma_control_manager, ZwlrGammaControlManagerV1.Request.get_gamma_control, .{ new_id, client.wl_output });
 
-    std.log.info("zwlr_gamma_control_manager_v1@{}.get_gamma_control: get_gamma_control={}", .{ gamma_control_manager, new_id });
+    log.debug("zwlr_gamma_control_manager_v1@{}.get_gamma_control: get_gamma_control={}", .{ gamma_control_manager, new_id });
     return new_id;
 }
 
@@ -585,7 +603,7 @@ pub fn zwlr_gamma_control_v1_set_gamma(client: *WaylandClient) !void {
 
     try send_request_with_fd(client.fd, gamma_control.id, ZwlrGammaControlV1.Request.set_gamma, gamma_ramp_fd);
 
-    std.log.info("zwlr_gamma_control_v1@{}.set_gamma: fd={}", .{ gamma_control.id, gamma_ramp_fd });
+    log.debug("zwlr_gamma_control_v1@{}.set_gamma: fd={}", .{ gamma_control.id, gamma_ramp_fd });
 }
 
 // ================= formatting helper functions =====================
