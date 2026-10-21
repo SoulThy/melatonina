@@ -52,3 +52,5 @@ Example: ./melatonina -k 4500
 3500K - <img src="https://placehold.co/15x15/ff9933/ff9933.png" width="15" align="absmiddle"> `#ff9933`<br>
 4500K - <img src="https://placehold.co/15x15/ffcc66/ffcc66.png" width="15" align="absmiddle"> `#ffcc66`<br>
 5500K - <img src="https://placehold.co/15x15/ffffff/ffffff.png" width="15" align="absmiddle"> `#ffffff`
+
+<sub>All code was written entirely by me. AI was used exclusively to explore generic concepts such as sockets, msghdr, circular buffers and the like.</sub>
